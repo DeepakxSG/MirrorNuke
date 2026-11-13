@@ -4,24 +4,22 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:window_manager/window_manager.dart';
 import 'android_control.dart';
+import 'embedded_server.dart';
 import 'lan_discovery.dart';
 import 'security.dart';
 import 'sessions.dart';
 import 'settings.dart';
 import 'startup.dart';
+import 'win_input.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
   final auto = args.contains('--autostart');
   if (Platform.isWindows) {
-    await windowManager.ensureInitialized();
     Startup.setup();
-    const opts = WindowOptions(size: Size(760, 820), minimumSize: Size(420, 600), title: 'MirrorNuke');
-    await windowManager.waitUntilReadyToShow(opts, () async {
-      await windowManager.show();
-      if (auto) await windowManager.minimize();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WinInput.configureWindow(minimize: auto);
     });
   }
   final s = await Settings.load(
@@ -62,11 +60,16 @@ class _DashboardPageState extends State<DashboardPage> {
   late bool _view = widget.settings.view;
   late bool _shareAudio = widget.settings.shareAudio;
   late bool _playAudio = widget.settings.playAudio;
+  late bool _hostLocal = widget.settings.hostLocalServer;
   late String _quality = widget.settings.quality;
 
   bool _acc = false, _startup = false, _hidePass = true, _scanningLan = false;
   List<DiscoveredLanDevice> _lanDevices = [];
   final DeviceDirectory _directory = DeviceDirectory();
+  final EmbeddedSignalingServer _localServer = EmbeddedSignalingServer();
+
+  String get _effectiveServerUrl =>
+      (_hostLocal && _localServer.running) ? _localServer.localClientUrl : _server.text.trim();
 
   @override
   void initState() {
@@ -75,15 +78,26 @@ class _DashboardPageState extends State<DashboardPage> {
     Startup.isEnabled().then((v) {
       if (mounted) setState(() => _startup = v);
     });
-    _refreshDirectory();
-    if (widget.autostart && widget.settings.share && validPassword(widget.settings.password) == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _startSession(autostart: true));
+    _syncLocalServer().then((_) {
+      _refreshDirectory();
+      if (widget.autostart && widget.settings.share && validPassword(widget.settings.password) == null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _startSession(autostart: true));
+      }
+    });
+  }
+
+  Future<void> _syncLocalServer() async {
+    if (_hostLocal) {
+      await _localServer.start(serverToken: _token.text.trim());
+    } else {
+      await _localServer.stop();
     }
   }
 
   @override
   void dispose() {
     _directory.dispose();
+    _localServer.dispose();
     _server.dispose();
     _token.dispose();
     _room.dispose();
@@ -95,7 +109,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
   void _refreshDirectory() {
     _directory.configure(
-      url: _server.text.trim(),
+      url: _effectiveServerUrl,
       room: _room.text.trim(),
       me: _me.text.trim(),
       token: _token.text.trim(),
@@ -134,8 +148,10 @@ class _DashboardPageState extends State<DashboardPage> {
       ..view = _view
       ..shareAudio = _shareAudio
       ..playAudio = _playAudio
+      ..hostLocalServer = _hostLocal
       ..quality = _quality;
     await s.save();
+    await _syncLocalServer();
     _refreshDirectory();
     if (notify && mounted) _snack('Settings saved');
   }
@@ -145,6 +161,8 @@ class _DashboardPageState extends State<DashboardPage> {
       _other.text = overrideTarget;
       _view = true;
     }
+    await _syncLocalServer();
+    final activeUrl = _effectiveServerUrl;
     final s = widget.settings
       ..server = _server.text.trim()
       ..token = _token.text.trim()
@@ -156,9 +174,10 @@ class _DashboardPageState extends State<DashboardPage> {
       ..view = autostart ? false : _view
       ..shareAudio = _shareAudio
       ..playAudio = _playAudio
+      ..hostLocalServer = _hostLocal
       ..quality = _quality;
 
-    final err = !validUrl(s.server)
+    final err = !validUrl(activeUrl)
         ? 'Server address must look like ws://192.168.1.10:8080'
         : !validRoom(s.room)
             ? 'Room code: 4-32 letters, numbers, - or _'
@@ -176,8 +195,38 @@ class _DashboardPageState extends State<DashboardPage> {
     }
     if (!autostart) await s.save();
     if (!mounted) return;
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => LinkPage(s: s)));
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => LinkPage(s: s, activeServerUrl: activeUrl)));
     _refreshDirectory();
+  }
+
+  void _showDiagnostics() {
+    final logs = AppLog.snapshot();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Diagnostic Log'),
+        content: SizedBox(
+          width: 480,
+          height: 300,
+          child: logs.isEmpty
+              ? const Center(child: Text('No warnings or errors logged in this session.'))
+              : ListView.builder(
+                  itemCount: logs.length,
+                  itemBuilder: (_, i) => Text(logs[logs.length - 1 - i], style: const TextStyle(fontSize: 12)),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              AppLog.clear();
+              Navigator.pop(ctx);
+            },
+            child: const Text('Clear'),
+          ),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+        ],
+      ),
+    );
   }
 
   Widget _buildOverviewTab() {
@@ -206,7 +255,59 @@ class _DashboardPageState extends State<DashboardPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
+                if (Platform.isWindows) ...[
+                  const SizedBox(height: 12),
+                  AnimatedBuilder(
+                    animation: _localServer,
+                    builder: (_, _) => Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _localServer.running ? Icons.wifi_tethering : Icons.wifi_tethering_off,
+                            size: 20,
+                            color: _localServer.running ? Colors.lightGreenAccent : Colors.orangeAccent,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _hostLocal
+                                      ? (_localServer.running
+                                          ? 'Built-in PC Server Ready: ${_localServer.primaryLanUrl}'
+                                          : _localServer.status)
+                                      : 'Using External Server: ${_server.text.trim()}',
+                                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                ),
+                                if (_hostLocal && _localServer.running)
+                                  const Text(
+                                    'Enter this address & room code on your phone — no terminal needed',
+                                    style: TextStyle(fontSize: 11),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          if (_hostLocal && _localServer.running)
+                            IconButton(
+                              tooltip: 'Copy server URL for phone',
+                              icon: const Icon(Icons.copy, size: 18),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: _localServer.primaryLanUrl));
+                                _snack('Copied ${_localServer.primaryLanUrl}');
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Share this device screen'),
@@ -260,9 +361,9 @@ class _DashboardPageState extends State<DashboardPage> {
                     border: OutlineInputBorder(),
                   ),
                   items: const [
-                    DropdownMenuItem(value: 'movie', child: Text('Movie & Video (30 FPS, Balanced)')),
-                    DropdownMenuItem(value: 'gaming', child: Text('Gaming & Low Latency (60 FPS)')),
-                    DropdownMenuItem(value: 'saver', child: Text('Data Saver (20 FPS)')),
+                    DropdownMenuItem(value: 'movie', child: Text('Movie & Video (30 FPS, 5 Mbps)')),
+                    DropdownMenuItem(value: 'gaming', child: Text('Gaming & Low Latency (60 FPS, 10 Mbps)')),
+                    DropdownMenuItem(value: 'saver', child: Text('Data Saver (20 FPS, 1.5 Mbps)')),
                   ],
                   onChanged: (v) {
                     if (v != null) {
@@ -304,7 +405,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget _buildDevicesTab() {
     return AnimatedBuilder(
       animation: _directory,
-      builder: (_, __) => ListView(
+      builder: (_, _) => ListView(
         padding: const EdgeInsets.all(20),
         children: [
           Row(
@@ -357,7 +458,7 @@ class _DashboardPageState extends State<DashboardPage> {
           Row(
             children: [
               Expanded(
-                child: Text('Wi-Fi & Chromecast Radar', style: Theme.of(context).textTheme.titleMedium),
+                child: Text('Wi-Fi Server Radar', style: Theme.of(context).textTheme.titleMedium),
               ),
               OutlinedButton.icon(
                 onPressed: _scanningLan ? null : _scanLan,
@@ -373,25 +474,26 @@ class _DashboardPageState extends State<DashboardPage> {
             const Card(
               child: Padding(
                 padding: EdgeInsets.all(16),
-                child: Text('Tap "Scan Wi-Fi" to discover MirrorNuke signaling servers and Chromecast / Google Cast receivers on your local network.'),
+                child: Text('Tap "Scan Wi-Fi" to discover MirrorNuke servers advertised on your local network.'),
               ),
             )
           else
             for (final item in _lanDevices)
               Card(
                 child: ListTile(
-                  leading: Icon(item.kind == 'chromecast' ? Icons.cast : Icons.dns),
+                  leading: const Icon(Icons.dns),
                   title: Text(item.name),
                   subtitle: Text('${item.model} (${item.host}:${item.port})'),
-                  trailing: item.kind == 'mirrornuke'
-                      ? TextButton(
-                          onPressed: () {
-                            setState(() => _server.text = item.wsUrl);
-                            _saveSettings();
-                          },
-                          child: const Text('Use Server'),
-                        )
-                      : const Chip(label: Text('Cast TV')),
+                  trailing: TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _hostLocal = false;
+                        _server.text = item.wsUrl;
+                      });
+                      _saveSettings();
+                    },
+                    child: const Text('Use Server'),
+                  ),
                 ),
               ),
         ],
@@ -403,11 +505,27 @@ class _DashboardPageState extends State<DashboardPage> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        if (Platform.isWindows) ...[
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Host local server on this PC'),
+            subtitle: const Text('Runs built-in signaling automatically — no Node.js or terminal needed'),
+            value: _hostLocal,
+            onChanged: (v) async {
+              setState(() => _hostLocal = v);
+              await _saveSettings(notify: false);
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
         TextField(
           controller: _server,
-          decoration: const InputDecoration(
-            labelText: 'Signaling Server URL (ws://PC-IP:8080)',
-            border: OutlineInputBorder(),
+          enabled: !_hostLocal,
+          decoration: InputDecoration(
+            labelText: _hostLocal
+                ? 'External Server URL (disabled while hosting locally)'
+                : 'Signaling Server URL (ws://PC-IP:8080)',
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 12),
@@ -459,6 +577,7 @@ class _DashboardPageState extends State<DashboardPage> {
         const SizedBox(height: 12),
         if (Startup.supported)
           SwitchListTile(
+            contentPadding: EdgeInsets.zero,
             title: const Text('Start MirrorNuke with Windows'),
             subtitle: const Text('Starts minimized and shares after you sign in'),
             value: _startup,
@@ -473,6 +592,12 @@ class _DashboardPageState extends State<DashboardPage> {
           onPressed: () => _saveSettings(),
           icon: const Icon(Icons.save),
           label: const Text('Save & Refresh Directory'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: _showDiagnostics,
+          icon: const Icon(Icons.bug_report_outlined),
+          label: const Text('View Diagnostic Log'),
         ),
       ],
     );
@@ -510,7 +635,8 @@ class _DashboardPageState extends State<DashboardPage> {
 
 class LinkPage extends StatefulWidget {
   final Settings s;
-  const LinkPage({super.key, required this.s});
+  final String activeServerUrl;
+  const LinkPage({super.key, required this.s, required this.activeServerUrl});
 
   @override
   State<LinkPage> createState() => _LinkPageState();
@@ -524,9 +650,10 @@ class _LinkPageState extends State<LinkPage> {
   void initState() {
     super.initState();
     final s = widget.s;
+    final url = widget.activeServerUrl;
     if (s.share) {
       _share = ShareSession(
-        url: s.server,
+        url: url,
         room: s.room,
         name: s.me,
         token: s.token,
@@ -537,8 +664,9 @@ class _LinkPageState extends State<LinkPage> {
     }
     if (s.view) {
       _view = ViewSession(
-        url: s.server,
+        url: url,
         room: s.room,
+        me: s.me,
         target: s.other,
         token: s.token,
         password: s.password,
@@ -567,7 +695,7 @@ class _LinkPageState extends State<LinkPage> {
             Center(
               child: AnimatedBuilder(
                 animation: _share!,
-                builder: (_, __) => Column(
+                builder: (_, _) => Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Padding(
@@ -607,7 +735,7 @@ class _LinkPageState extends State<LinkPage> {
               bottom: 10,
               child: AnimatedBuilder(
                 animation: _share!,
-                builder: (_, __) => Container(
+                builder: (_, _) => Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
                   child: Text(
@@ -633,7 +761,7 @@ class RemoteView extends StatefulWidget {
 }
 
 class _RemoteViewState extends State<RemoteView> {
-  int _mode = 0; // 0 touch/click, 1 right-click, 2 scroll
+  int _mode = 0;
   int _btn = 0;
   int _lastMove = 0;
   ViewSession get v => widget.view;
@@ -765,7 +893,7 @@ class _RemoteViewState extends State<RemoteView> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: v,
-      builder: (_, __) => Stack(
+      builder: (_, _) => Stack(
         children: [
           Positioned.fill(
             child: LayoutBuilder(builder: (ctx, c) {

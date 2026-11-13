@@ -29,7 +29,6 @@ class RemoteControlService : AccessibilityService() {
         return Pair(dm.widthPixels.toFloat(), dm.heightPixels.toFloat())
     }
 
-    /** points = x1,y1,x2,y2... normalized 0..1. One point = tap. */
     fun gesture(points: List<Double>, durationMs: Long) {
         if (points.size < 2) return
         val (w, h) = screenSize()

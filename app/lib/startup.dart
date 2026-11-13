@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:launch_at_startup/launch_at_startup.dart';
+import 'security.dart';
 
 class Startup {
   static bool get supported => Platform.isWindows;
@@ -17,7 +18,8 @@ class Startup {
     if (!supported) return false;
     try {
       return await launchAtStartup.isEnabled();
-    } catch (_) {
+    } catch (e) {
+      AppLog.add('startup.isEnabled', e);
       return false;
     }
   }
@@ -26,6 +28,8 @@ class Startup {
     if (!supported) return;
     try {
       on ? await launchAtStartup.enable() : await launchAtStartup.disable();
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('startup.set', e);
+    }
   }
 }

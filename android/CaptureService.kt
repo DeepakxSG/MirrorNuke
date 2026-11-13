@@ -25,7 +25,7 @@ import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 /**
- * Foreground service required by Android 14+ for MediaProjection screen & internal audio capture,
+ * Foreground service for Android 14+ MediaProjection screen & internal audio capture,
  * plus low-latency AudioTrack playback when this Android device acts as a receiver.
  */
 class CaptureService : Service() {
@@ -90,6 +90,7 @@ class CaptureService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var audioProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
+    private var seqNum: Int = 0
 
     @Volatile
     private var capturingAudio = false
@@ -97,7 +98,10 @@ class CaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ensureForeground()
+        if (!ensureForeground()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_START_AUDIO -> {
                 val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
@@ -112,30 +116,41 @@ class CaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun ensureForeground() {
-        val channelId = "mirrornuke_capture"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(
-                NotificationChannel(channelId, "MirrorNuke Casting", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, channelId)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        val notification = builder
-            .setContentTitle("MirrorNuke")
-            .setContentText("Casting screen and audio")
-            .setSmallIcon(applicationInfo.icon)
-            .setOngoing(true)
-            .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(1, notification)
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopInternalAudioCapture()
+        stopRemotePlayback()
+        stopSelf()
+    }
+
+    private fun ensureForeground(): Boolean {
+        return try {
+            val channelId = "mirrornuke_capture"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.createNotificationChannel(
+                    NotificationChannel(channelId, "MirrorNuke Casting", NotificationManager.IMPORTANCE_LOW)
+                )
+            }
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, channelId)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+            val notification = builder
+                .setContentTitle("MirrorNuke")
+                .setContentText("Casting screen and audio")
+                .setSmallIcon(applicationInfo.icon)
+                .setOngoing(true)
+                .build()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(1, notification)
+            }
+            true
+        } catch (_: Throwable) {
+            false
         }
     }
 
@@ -181,6 +196,7 @@ class CaptureService : Service() {
 
             audioRecord = record
             capturingAudio = true
+            seqNum = 0
             record.startRecording()
 
             thread(name = "MirrorNukeAudioCapture", isDaemon = true) {
@@ -188,7 +204,9 @@ class CaptureService : Service() {
                 while (capturingAudio) {
                     val read = record.read(pcmBuf, 0, frameBytes)
                     if (read == frameBytes) {
-                        val encoded = ImaAdpcm.encodeStereoFrame(pcmBuf)
+                        val seq = seqNum and 0xFFFF
+                        seqNum = (seqNum + 1) and 0xFFFF
+                        val encoded = ImaAdpcm.encodeStereoFrame(pcmBuf, seq)
                         mainHandler.post {
                             audioEventSink?.success(encoded)
                         }
@@ -225,8 +243,11 @@ class CaptureService : Service() {
 }
 
 /**
- * Lightweight 4:1 stereo IMA-ADPCM encoder so 48 kHz stereo movie audio streams at ~384 kbps
- * over a WebRTC DataChannel with sub-5ms framing latency.
+ * 4:1 stereo IMA-ADPCM encoder with a 10-byte header:
+ * [0..1] uint16 LE seq
+ * [2..3] int16  LE predL, [4] uint8 idxL, [5] 0
+ * [6..7] int16  LE predR, [8] uint8 idxR, [9] 0
+ * Each 20 ms frame is self-contained (keyframe state) and sequenced for jitter reordering.
  */
 object ImaAdpcm {
     private val INDEX_TABLE = intArrayOf(
@@ -245,7 +266,7 @@ object ImaAdpcm {
         15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
     )
 
-    fun encodeStereoFrame(pcmBytes: ByteArray): ByteArray {
+    fun encodeStereoFrame(pcmBytes: ByteArray, seq: Int = 0): ByteArray {
         val sb = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val totalShorts = sb.limit()
         val frames = totalShorts / 2
@@ -257,7 +278,8 @@ object ImaAdpcm {
         var idxR = 0
 
         val payloadFrames = frames - 1
-        val out = ByteBuffer.allocate(8 + payloadFrames).order(ByteOrder.LITTLE_ENDIAN)
+        val out = ByteBuffer.allocate(10 + payloadFrames).order(ByteOrder.LITTLE_ENDIAN)
+        out.putShort((seq and 0xFFFF).toShort())
         out.putShort(predL.toShort())
         out.put(idxL.toByte())
         out.put(0.toByte())

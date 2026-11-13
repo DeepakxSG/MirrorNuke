@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'security.dart';
 
 class Settings {
   String server, token, room, me, other, password, quality;
-  bool share, view, shareAudio, playAudio;
+  bool share, view, shareAudio, playAudio, hostLocalServer;
 
   Settings({
     required this.server,
@@ -17,6 +19,7 @@ class Settings {
     required this.shareAudio,
     required this.playAudio,
     required this.quality,
+    required this.hostLocalServer,
   });
 
   static const _sec = FlutterSecureStorage();
@@ -27,7 +30,9 @@ class Settings {
     try {
       password = await _sec.read(key: 'password') ?? '';
       token = await _sec.read(key: 'token') ?? '';
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('settings.load', e);
+    }
     return Settings(
       server: p.getString('server') ?? 'ws://192.168.1.10:8080',
       token: token,
@@ -40,6 +45,7 @@ class Settings {
       shareAudio: p.getBool('shareAudio') ?? true,
       playAudio: p.getBool('playAudio') ?? true,
       quality: p.getString('quality') ?? 'movie',
+      hostLocalServer: p.getBool('hostLocalServer') ?? Platform.isWindows,
     );
   }
 
@@ -54,9 +60,12 @@ class Settings {
     await p.setBool('shareAudio', shareAudio);
     await p.setBool('playAudio', playAudio);
     await p.setString('quality', quality);
+    await p.setBool('hostLocalServer', hostLocalServer);
     try {
       await _sec.write(key: 'password', value: password);
       await _sec.write(key: 'token', value: token);
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('settings.save', e);
+    }
   }
 }

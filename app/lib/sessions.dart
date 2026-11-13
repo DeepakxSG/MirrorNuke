@@ -193,7 +193,9 @@ class Signaling {
               return;
             }
             onMessage?.call(m);
-          } catch (_) {}
+          } catch (e) {
+            AppLog.add('signaling.parse', e);
+          }
         },
         onError: (_) => _lost(),
         onDone: _lost,
@@ -212,7 +214,8 @@ class Signaling {
       }
       send(joinMsg);
       onConnected?.call();
-    } catch (_) {
+    } catch (e) {
+      AppLog.add('signaling.connect', e);
       onStatus?.call('Cannot reach signaling server. Retrying...');
       _lost();
     }
@@ -244,7 +247,9 @@ class Signaling {
 }
 
 const _rtcConfig = {
-  'iceServers': [],
+  'iceServers': [
+    {'urls': 'stun:stun.l.google.com:19302'},
+  ],
   'sdpSemantics': 'unified-plan',
 };
 
@@ -281,7 +286,7 @@ class ShareSession extends ChangeNotifier {
   final StreamMetrics metrics = StreamMetrics();
 
   bool _disposed = false;
-  late final Signaling _sig = Signaling(url, roomKey, token);
+  late final Signaling _sig = Signaling(url, roomKey, token, deviceName: name);
   RTCPeerConnection? _pc;
   RTCDataChannel? _dc;
   RTCDataChannel? _audioDc;
@@ -296,8 +301,10 @@ class ShareSession extends ChangeNotifier {
   bool _authed = false;
   String _nonce = '';
   String _senderFp = '', _viewerFp = '';
+  String? _viewerName;
   int _fails = 0;
   DateTime? _lockUntil;
+  int _lastReadyAt = 0;
 
   int _winStart = 0, _winCount = 0;
   final List<List<double>> _path = [];
@@ -309,6 +316,7 @@ class ShareSession extends ChangeNotifier {
   }
 
   double get _targetFps => quality == 'gaming' ? 60.0 : (quality == 'saver' ? 20.0 : 30.0);
+  int get _maxBitrateBps => quality == 'gaming' ? 10000000 : (quality == 'saver' ? 1500000 : 5000000);
 
   Future<void> start() async {
     final err = validPassword(password) ??
@@ -321,6 +329,7 @@ class ShareSession extends ChangeNotifier {
     try {
       await _capture();
     } catch (e) {
+      AppLog.add('share.capture', e);
       _set('Screen capture failed: $e');
       return;
     }
@@ -330,7 +339,7 @@ class ShareSession extends ChangeNotifier {
       _set(audioActive
           ? 'Sharing screen + audio. Waiting for viewer...'
           : 'Sharing screen. Waiting for viewer...');
-      _sig.send({'type': 'hello'});
+      _sig.send({'type': 'hello', 'from': name});
     };
     await _sig.connect();
   }
@@ -364,6 +373,9 @@ class ShareSession extends ChangeNotifier {
             'audio': false,
           });
         }
+        for (final vt in st.getVideoTracks()) {
+          vt.contentHint = 'detail';
+        }
         _streams.add(st);
         _names.add(s.name);
       }
@@ -372,7 +384,11 @@ class ShareSession extends ChangeNotifier {
       if (!ok) throw 'permission denied';
       await AndroidControl.startCaptureService();
       await Future.delayed(const Duration(milliseconds: 300));
-      _streams.add(await navigator.mediaDevices.getDisplayMedia({'video': true}));
+      final st = await navigator.mediaDevices.getDisplayMedia({'video': true});
+      for (final vt in st.getVideoTracks()) {
+        vt.contentHint = 'detail';
+      }
+      _streams.add(st);
       _names.add('Phone Screen');
 
       if (shareAudio) {
@@ -411,6 +427,29 @@ class ShareSession extends ChangeNotifier {
     }
   }
 
+  Future<void> _applyEncoderTuning() async {
+    if (_pc == null) return;
+    try {
+      final senders = await _pc!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          final params = sender.parameters;
+          params.degradationPreference = RTCDegradationPreference.MAINTAIN_RESOLUTION;
+          final encs = params.encodings;
+          if (encs != null && encs.isNotEmpty) {
+            for (final enc in encs) {
+              enc.maxBitrate = _maxBitrateBps;
+              enc.maxFramerate = _targetFps.round();
+            }
+          }
+          await sender.setParameters(params);
+        }
+      }
+    } catch (e) {
+      AppLog.add('share.setParameters', e);
+    }
+  }
+
   String _stateLabel(RTCPeerConnectionState s) {
     switch (s) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
@@ -439,15 +478,31 @@ class ShareSession extends ChangeNotifier {
 
     _pc = await createPeerConnection(_rtcConfig);
     _pc!.onIceCandidate = (c) {
-      if (c.candidate != null) _sig.send({'type': 'candidate', 'candidate': c.toMap()});
+      if (c.candidate != null) {
+        _sig.send({
+          'type': 'candidate',
+          'from': name,
+          if (_viewerName != null) 'to': _viewerName,
+          'candidate': c.toMap(),
+        });
+      }
     };
-    _pc!.onConnectionState = (s) => _set(_stateLabel(s));
+    _pc!.onConnectionState = (s) {
+      if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          s == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _authed = false;
+        _applySelection();
+      }
+      _set(_stateLabel(s));
+    };
 
     for (final st in _streams) {
       for (final t in st.getTracks()) {
         await _pc!.addTrack(t, st);
       }
     }
+    await _applyEncoderTuning();
 
     _dc = await _pc!.createDataChannel('control', _controlInit());
     _dc!.onMessage = (m) => _onControl(m.text);
@@ -530,11 +585,24 @@ class ShareSession extends ChangeNotifier {
         case 'ready':
           if (_streams.isEmpty) return;
           if (_lockUntil != null && DateTime.now().isBefore(_lockUntil!)) return;
+          // Do not allow an unauthenticated peer to disrupt an active authenticated viewer
+          if (_authed) return;
+          final readyAt = DateTime.now().millisecondsSinceEpoch;
+          if (readyAt - _lastReadyAt < 1500) return;
+          _lastReadyAt = readyAt;
+          final from = m['from'];
+          _viewerName = (from is String && validName(from)) ? from : null;
+
           await _newPc();
           final offer = await _pc!.createOffer();
           _senderFp = fingerprintOf(offer.sdp);
           await _pc!.setLocalDescription(offer);
-          _sig.send({'type': 'offer', 'sdp': offer.sdp});
+          _sig.send({
+            'type': 'offer',
+            'from': name,
+            if (_viewerName != null) 'to': _viewerName,
+            'sdp': offer.sdp,
+          });
           break;
         case 'answer':
           final sdp = m['sdp'];
@@ -556,7 +624,7 @@ class ShareSession extends ChangeNotifier {
           break;
       }
     } catch (e) {
-      debugPrint('signal error: $e');
+      AppLog.add('share.signal', e);
     }
   }
 
@@ -661,7 +729,7 @@ class ShareSession extends ChangeNotifier {
           break;
       }
     } catch (e) {
-      debugPrint('control error: $e');
+      AppLog.add('share.control', e);
     }
   }
 
@@ -741,12 +809,13 @@ class ShareSession extends ChangeNotifier {
 }
 
 class ViewSession extends ChangeNotifier {
-  final String url, room, target, token, password;
+  final String url, room, me, target, token, password;
   final bool playAudio;
 
   ViewSession({
     required this.url,
     required this.room,
+    required this.me,
     required this.target,
     required this.token,
     required this.password,
@@ -765,7 +834,7 @@ class ViewSession extends ChangeNotifier {
   bool audioMuted = false;
 
   bool _disposed = false, _retryScheduled = false, _remoteDescSet = false;
-  late final Signaling _sig = Signaling(url, roomKey, token);
+  late final Signaling _sig = Signaling(url, roomKey, token, deviceName: me);
   RTCPeerConnection? _pc;
   RTCDataChannel? _dc;
   RTCDataChannel? _audioDc;
@@ -775,6 +844,7 @@ class ViewSession extends ChangeNotifier {
   String _nonce = '', _senderFp = '', _viewerFp = '';
 
   final WinSpeakerPlayer _winSpeaker = WinSpeakerPlayer();
+  final AudioJitterBuffer _jitterBuffer = AudioJitterBuffer(targetFrames: 2, maxFrames: 5);
   Timer? _statsTimer;
   int _prevBytesRecv = 0, _prevStatsTs = 0;
 
@@ -792,6 +862,7 @@ class ViewSession extends ChangeNotifier {
   void toggleMute() {
     audioMuted = !audioMuted;
     _winSpeaker.setMuted(audioMuted);
+    if (audioMuted) _jitterBuffer.reset();
     final st = renderer.srcObject;
     if (st != null) {
       for (final a in st.getAudioTracks()) {
@@ -818,7 +889,7 @@ class ViewSession extends ChangeNotifier {
     _sig.onStatus = _set;
     _sig.onConnected = () {
       _set('Waiting for "$target" to share...');
-      _sig.send({'type': 'ready'});
+      _sig.send({'type': 'ready', 'from': me, 'to': target});
     };
     await _sig.connect();
   }
@@ -829,6 +900,7 @@ class ViewSession extends ChangeNotifier {
     authed = false;
     _remoteDescSet = false;
     _pendingIce.clear();
+    _jitterBuffer.reset();
     _nonce = '';
     _senderFp = '';
     _viewerFp = '';
@@ -838,7 +910,14 @@ class ViewSession extends ChangeNotifier {
 
     _pc = await createPeerConnection(_rtcConfig);
     _pc!.onIceCandidate = (c) {
-      if (c.candidate != null) _sig.send({'type': 'candidate', 'candidate': c.toMap()});
+      if (c.candidate != null) {
+        _sig.send({
+          'type': 'candidate',
+          'from': me,
+          'to': target,
+          'candidate': c.toMap(),
+        });
+      }
     };
     _pc!.onConnectionState = (s) {
       if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
@@ -846,6 +925,7 @@ class ViewSession extends ChangeNotifier {
       } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           s == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         authed = false;
+        _jitterBuffer.reset();
         _set('Connection lost. Reconnecting...');
         _scheduleReady();
       }
@@ -867,13 +947,17 @@ class ViewSession extends ChangeNotifier {
     _audioDc = await _pc!.createDataChannel('audio', _audioChannelInit());
     _audioDc!.onMessage = (m) {
       if (!authed || !playAudio || audioMuted || !m.isBinary) return;
-      final pcm = ImaAdpcmDecoder.decodeStereoFrame(m.binary);
-      if (pcm.isEmpty) return;
+      final decoded = ImaAdpcmDecoder.decodePacket(m.binary);
+      if (decoded == null) return;
+      final frames = _jitterBuffer.push(decoded.seq, decoded.pcm);
+      if (frames.isEmpty) return;
       remoteAudioEnabled = true;
-      if (Platform.isWindows) {
-        _winSpeaker.playPcm(pcm);
-      } else if (Platform.isAndroid) {
-        AndroidControl.playAudioPcm(pcm);
+      for (final pcm in frames) {
+        if (Platform.isWindows) {
+          _winSpeaker.playPcm(pcm);
+        } else if (Platform.isAndroid) {
+          AndroidControl.playAudioPcm(pcm);
+        }
       }
     };
 
@@ -929,7 +1013,7 @@ class ViewSession extends ChangeNotifier {
     _retryScheduled = true;
     Future.delayed(const Duration(seconds: 3), () {
       _retryScheduled = false;
-      if (!_disposed && !authed) _sig.send({'type': 'ready'});
+      if (!_disposed && !authed) _sig.send({'type': 'ready', 'from': me, 'to': target});
     });
   }
 
@@ -964,15 +1048,21 @@ class ViewSession extends ChangeNotifier {
           break;
         case 'info':
           if (!authed) return;
+          final rawIds = d['ids'];
+          final rawNames = d['names'];
+          if (rawIds is! List) return;
           os = d['os'] == 'windows' ? 'windows' : 'android';
-          ids = List<String>.from((d['ids'] as List).take(8));
-          names = List<String>.from((d['names'] as List).take(8).map((e) => '$e'));
-          selected = (d['sel'] as num).toInt().clamp(0, max(0, ids.length - 1));
+          ids = rawIds.take(8).map((e) => '$e').toList();
+          names = rawNames is List ? rawNames.take(8).map((e) => '$e').toList() : <String>[];
+          final sel = d['sel'];
+          selected = (sel is num ? sel.toInt() : 0).clamp(0, max(0, ids.length - 1));
           if (d['audio'] == true) remoteAudioEnabled = true;
           _show();
           break;
       }
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('view.channel', e);
+    }
   }
 
   void _show() {
@@ -1024,7 +1114,7 @@ class ViewSession extends ChangeNotifier {
     try {
       switch (m['type']) {
         case 'hello':
-          _sig.send({'type': 'ready'});
+          _sig.send({'type': 'ready', 'from': me, 'to': target});
           break;
         case 'offer':
           final sdp = m['sdp'];
@@ -1036,7 +1126,12 @@ class ViewSession extends ChangeNotifier {
           final answer = await _pc!.createAnswer();
           _viewerFp = fingerprintOf(answer.sdp);
           await _pc!.setLocalDescription(answer);
-          _sig.send({'type': 'answer', 'sdp': answer.sdp});
+          _sig.send({
+            'type': 'answer',
+            'from': me,
+            'to': target,
+            'sdp': answer.sdp,
+          });
           await _flushPendingIce();
           break;
         case 'candidate':
@@ -1051,7 +1146,7 @@ class ViewSession extends ChangeNotifier {
           break;
       }
     } catch (e) {
-      debugPrint('signal error: $e');
+      AppLog.add('view.signal', e);
     }
   }
 

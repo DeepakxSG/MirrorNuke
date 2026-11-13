@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
+import 'security.dart';
 
 class AndroidControl {
   static const _ch = MethodChannel('mirrornuke/control');
@@ -10,7 +11,8 @@ class AndroidControl {
     if (!Platform.isAndroid) return false;
     try {
       return await _ch.invokeMethod<bool>('isEnabled') ?? false;
-    } catch (_) {
+    } catch (e) {
+      AppLog.add('android.isEnabled', e);
       return false;
     }
   }
@@ -18,31 +20,41 @@ class AndroidControl {
   static Future<void> openSettings() async {
     try {
       await _ch.invokeMethod('openSettings');
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.openSettings', e);
+    }
   }
 
   static Future<void> gesture(List<double> points, int durMs) async {
     try {
       await _ch.invokeMethod('gesture', {'points': points, 'dur': durMs});
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.gesture', e);
+    }
   }
 
   static Future<void> global(String action) async {
     try {
       await _ch.invokeMethod('global', {'a': action});
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.global', e);
+    }
   }
 
   static Future<void> text(String s) async {
     try {
       await _ch.invokeMethod('text', {'s': s});
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.text', e);
+    }
   }
 
   static Future<void> backspace() async {
     try {
       await _ch.invokeMethod('backspace');
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.backspace', e);
+    }
   }
 
   static Future<void> startCaptureService() async {
@@ -54,7 +66,8 @@ class AndroidControl {
     if (!Platform.isAndroid) return false;
     try {
       return await _ch.invokeMethod<bool>('startAudioCapture') ?? false;
-    } catch (_) {
+    } catch (e) {
+      AppLog.add('android.startAudioCapture', e);
       return false;
     }
   }
@@ -63,7 +76,9 @@ class AndroidControl {
     if (!Platform.isAndroid) return;
     try {
       await _ch.invokeMethod('stopAudioCapture');
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.stopAudioCapture', e);
+    }
   }
 
   static Stream<Uint8List> get encodedAudioStream {
@@ -78,20 +93,26 @@ class AndroidControl {
     if (!Platform.isAndroid || pcmBytes.isEmpty) return;
     try {
       await _ch.invokeMethod('playAudioPcm', {'pcm': pcmBytes});
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.playAudioPcm', e);
+    }
   }
 
   static Future<void> stopAudioPlayback() async {
     if (!Platform.isAndroid) return;
     try {
       await _ch.invokeMethod('stopAudioPlayback');
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.stopAudioPlayback', e);
+    }
   }
 
   static Future<void> stopCaptureService() async {
     if (!Platform.isAndroid) return;
     try {
       await _ch.invokeMethod('stopCapture');
-    } catch (_) {}
+    } catch (e) {
+      AppLog.add('android.stopCaptureService', e);
+    }
   }
 }

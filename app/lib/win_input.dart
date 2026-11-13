@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:ui' show Rect;
 import 'package:ffi/ffi.dart';
+import 'security.dart';
 
 final class _WinRect extends Struct {
   @Int32()
@@ -89,6 +90,31 @@ typedef _GetSystemMetricsDart = int Function(int nIndex);
 typedef _SendInputNative = Uint32 Function(Uint32 cInputs, Pointer<_Input> pInputs, Int32 cbSize);
 typedef _SendInputDart = int Function(int cInputs, Pointer<_Input> pInputs, int cbSize);
 
+typedef _GetForegroundWindowNative = IntPtr Function();
+typedef _GetForegroundWindowDart = int Function();
+
+typedef _SetWindowPosNative = Int32 Function(
+  IntPtr hWnd,
+  IntPtr hWndInsertAfter,
+  Int32 X,
+  Int32 Y,
+  Int32 cx,
+  Int32 cy,
+  Uint32 uFlags,
+);
+typedef _SetWindowPosDart = int Function(
+  int hWnd,
+  int hWndInsertAfter,
+  int X,
+  int Y,
+  int cx,
+  int cy,
+  int uFlags,
+);
+
+typedef _ShowWindowNative = Int32 Function(IntPtr hWnd, Int32 nCmdShow);
+typedef _ShowWindowDart = int Function(int hWnd, int nCmdShow);
+
 final List<Rect> _mons = [];
 
 int _enumCb(int hMonitor, int hdc, Pointer<_WinRect> r, int data) {
@@ -101,14 +127,15 @@ int _enumCb(int hMonitor, int hdc, Pointer<_WinRect> r, int data) {
   return 1;
 }
 
-/// Injects mouse/keyboard input on Windows using user32.dll SendInput.
-/// Monitors are sorted primary-first (0,0) then left-to-right, top-to-bottom
-/// to match DXGI Desktop Duplication capture order.
+/// Injects mouse/keyboard input and manages window state on Windows via user32.dll.
 class WinInput {
   static DynamicLibrary? _user32;
   static late _EnumDisplayMonitorsDart _enumDisplayMonitors;
   static late _GetSystemMetricsDart _getSystemMetrics;
   static late _SendInputDart _sendInput;
+  static late _GetForegroundWindowDart _getForegroundWindow;
+  static late _SetWindowPosDart _setWindowPos;
+  static late _ShowWindowDart _showWindow;
   static bool _bound = false;
 
   static List<Rect> _cache = [];
@@ -124,10 +151,30 @@ class WinInput {
       _getSystemMetrics =
           _user32!.lookupFunction<_GetSystemMetricsNative, _GetSystemMetricsDart>('GetSystemMetrics');
       _sendInput = _user32!.lookupFunction<_SendInputNative, _SendInputDart>('SendInput');
+      _getForegroundWindow =
+          _user32!.lookupFunction<_GetForegroundWindowNative, _GetForegroundWindowDart>('GetForegroundWindow');
+      _setWindowPos = _user32!.lookupFunction<_SetWindowPosNative, _SetWindowPosDart>('SetWindowPos');
+      _showWindow = _user32!.lookupFunction<_ShowWindowNative, _ShowWindowDart>('ShowWindow');
       _bound = true;
       return true;
-    } catch (_) {
+    } catch (e) {
+      AppLog.add('winInput.bind', e);
       return false;
+    }
+  }
+
+  static void configureWindow({bool minimize = false}) {
+    if (!_ensureBound()) return;
+    try {
+      final hwnd = _getForegroundWindow();
+      if (hwnd != 0) {
+        _setWindowPos(hwnd, 0, 0, 0, 760, 820, 0x0002 | 0x0004);
+        if (minimize) {
+          _showWindow(hwnd, 6);
+        }
+      }
+    } catch (e) {
+      AppLog.add('winInput.configureWindow', e);
     }
   }
 
@@ -156,7 +203,7 @@ class WinInput {
   static void _mouseEvent(int flags, {int dx = 0, int dy = 0, int data = 0}) {
     if (!_ensureBound()) return;
     final p = calloc<_Input>();
-    p.ref.type = 0; // INPUT_MOUSE
+    p.ref.type = 0;
     p.ref.u.mi.dx = dx;
     p.ref.u.mi.dy = dy;
     p.ref.u.mi.mouseData = data & 0xFFFFFFFF;
@@ -170,7 +217,7 @@ class WinInput {
   static void _keyEvent(int vk, int scan, int flags) {
     if (!_ensureBound()) return;
     final p = calloc<_Input>();
-    p.ref.type = 1; // INPUT_KEYBOARD
+    p.ref.type = 1;
     p.ref.u.ki.wVk = vk;
     p.ref.u.ki.wScan = scan;
     p.ref.u.ki.dwFlags = flags;
@@ -187,10 +234,10 @@ class WinInput {
     final r = mons[screen.clamp(0, mons.length - 1)];
     final px = r.left + nx * (r.width - 1);
     final py = r.top + ny * (r.height - 1);
-    final vx = _getSystemMetrics(76); // SM_XVIRTUALSCREEN
-    final vy = _getSystemMetrics(77); // SM_YVIRTUALSCREEN
-    final vw = _getSystemMetrics(78); // SM_CXVIRTUALSCREEN
-    final vh = _getSystemMetrics(79); // SM_CYVIRTUALSCREEN
+    final vx = _getSystemMetrics(76);
+    final vy = _getSystemMetrics(77);
+    final vw = _getSystemMetrics(78);
+    final vh = _getSystemMetrics(79);
     if (vw <= 0 || vh <= 0) return;
 
     final ax = (((px - vx) * 65535 / vw).round()).clamp(0, 65535);

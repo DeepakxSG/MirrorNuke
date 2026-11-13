@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Creates the Flutter project (mirrornuke_app/) and applies all MirrorNuke sources and Android patches.
-Run from the MirrorNuke root folder:  python tools/setup_project.py [--org com.yourname]
-Safe to run multiple times."""
+"""Creates the Flutter project (mirrornuke_app/) and applies pinned dependencies,
+all MirrorNuke sources, unit tests, and Android patches.
+Run from the MirrorNuke root folder:  python tools/setup_project.py [--org com.yourname]"""
 import os, re, shutil, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'mirrornuke_app')
+TEMPLATES = os.path.join(ROOT, 'tools', 'templates')
 ORG = 'com.mirrornuke'
 if '--org' in sys.argv:
     ORG = sys.argv[sys.argv.index('--org') + 1]
@@ -25,7 +26,7 @@ def read(path):
     with open(path, encoding='utf-8') as f:
         return f.read()
 
-# 1. Create Flutter project
+# 1. Create Flutter project once and apply pinned pubspec.yaml + analysis_options.yaml
 if not os.path.isdir(APP):
     run([
         'flutter', 'create',
@@ -34,37 +35,24 @@ if not os.path.isdir(APP):
         '--project-name', 'mirrornuke_app',
         'mirrornuke_app'
     ], cwd=ROOT)
-    run([
-        'flutter', 'pub', 'add',
-        'flutter_webrtc',
-        'web_socket_channel',
-        'ffi',
-        'crypto',
-        'shared_preferences',
-        'flutter_secure_storage',
-        'launch_at_startup',
-        'window_manager',
-        'multicast_dns'
-    ], cwd=APP)
 
-# 2. Copy Dart sources & replace default MyApp widget test so flutter analyze passes
+shutil.copy(os.path.join(TEMPLATES, 'pubspec.yaml'), os.path.join(APP, 'pubspec.yaml'))
+shutil.copy(os.path.join(TEMPLATES, 'analysis_options.yaml'), os.path.join(APP, 'analysis_options.yaml'))
+run(['flutter', 'pub', 'get'], cwd=APP)
+
+# 2. Copy Dart sources & unit tests
 lib = os.path.join(APP, 'lib')
 for f in os.listdir(os.path.join(ROOT, 'app', 'lib')):
     if f.endswith('.dart'):
         shutil.copy(os.path.join(ROOT, 'app', 'lib', f), os.path.join(lib, f))
 
-test_file = os.path.join(APP, 'test', 'widget_test.dart')
-write(test_file, """import 'package:flutter_test/flutter_test.dart';
-import 'package:mirrornuke_app/security.dart';
-
-void main() {
-  test('Security validators work', () {
-    expect(validRoom('home-room'), isTrue);
-    expect(validName('pc_1'), isTrue);
-    expect(validPassword('secret123'), isNull);
-  });
-}
-""")
+test_dir = os.path.join(APP, 'test')
+os.makedirs(test_dir, exist_ok=True)
+stale_test = os.path.join(test_dir, 'widget_test.dart')
+if os.path.exists(stale_test):
+    os.remove(stale_test)
+for f in ('security_test.dart', 'audio_test.dart'):
+    shutil.copy(os.path.join(TEMPLATES, f), os.path.join(test_dir, f))
 
 # 3. Copy Kotlin sources & XML resources
 kt_dir = os.path.join(APP, 'android', 'app', 'src', 'main', 'kotlin', *PKG.split('.'))
@@ -89,7 +77,7 @@ shutil.copy(
     os.path.join(res, 'values', 'strings.xml')
 )
 
-# 4. Add ProGuard keep rules for WebRTC so release APKs preserve native WebRTC classes
+# 4. ProGuard keep rules for WebRTC
 proguard_path = os.path.join(APP, 'android', 'app', 'proguard-rules.pro')
 write(proguard_path, """-keep class org.webrtc.** { *; }
 -keep class com.cloudwebrtc.webrtc.** { *; }
@@ -153,5 +141,7 @@ for name in ('build.gradle.kts', 'build.gradle'):
 print('\nMirrorNuke project setup complete.')
 print('Next steps:')
 print('  cd mirrornuke_app')
+print('  flutter analyze --no-fatal-infos')
+print('  flutter test')
 print('  flutter build windows --release')
 print('  flutter build apk --release')

@@ -1,6 +1,8 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 
 final _nameRe = RegExp(r'^[A-Za-z0-9_-]{1,32}$');
 final _roomRe = RegExp(r'^[A-Za-z0-9_-]{4,32}$');
@@ -48,4 +50,21 @@ double? unit(dynamic v) {
 String cleanText(String s) {
   final c = s.replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), '');
   return c.length > 200 ? c.substring(0, 200) : c;
+}
+
+/// Lightweight ring-buffer diagnostic logger so runtime errors are inspectable instead of silent.
+class AppLog {
+  static final ListQueue<String> _entries = ListQueue<String>();
+  static const int _maxEntries = 100;
+
+  static void add(String area, Object err) {
+    final ts = DateTime.now().toIso8601String().substring(11, 19);
+    final line = '[$ts] $area: $err';
+    debugPrint(line);
+    if (_entries.length >= _maxEntries) _entries.removeFirst();
+    _entries.addLast(line);
+  }
+
+  static List<String> snapshot() => List<String>.unmodifiable(_entries);
+  static void clear() => _entries.clear();
 }
