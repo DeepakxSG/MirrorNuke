@@ -4,7 +4,23 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+        working-directory: server
+      - run: node --test server.test.js
+        working-directory: server
+
   android:
     runs-on: ubuntu-latest
     steps:
@@ -16,11 +32,14 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python tools/setup_project.py
       - run: flutter analyze --no-fatal-infos
+        working-directory: mirrornuke_app
+      - run: flutter test
         working-directory: mirrornuke_app
       - run: flutter build apk --release
         working-directory: mirrornuke_app
@@ -28,6 +47,7 @@ jobs:
         with:
           name: MirrorNuke-android-apk
           path: mirrornuke_app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -36,22 +56,26 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python tools/setup_project.py
       - run: flutter analyze --no-fatal-infos
         working-directory: mirrornuke_app
+      - run: flutter test
+        working-directory: mirrornuke_app
       - run: flutter build windows --release
         working-directory: mirrornuke_app
-      - name: Bundle VC++ runtime for clean Windows 10/11 PCs
+      - name: Stage official VC++ Redistributable for Inno Setup
         shell: pwsh
         run: |
-          $rel = "mirrornuke_app/build/windows/x64/runner/Release"
-          foreach ($d in 'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll') {
-            if (Test-Path "C:\Windows\System32\$d") {
-              Copy-Item "C:\Windows\System32\$d" $rel -Force
-            }
+          New-Item -ItemType Directory -Path "installer/redist" -Force | Out-Null
+          $redist = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\vc_redist.x64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $redist) {
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "installer/redist/vc_redist.x64.exe"
+          } else {
+            Copy-Item $redist.FullName "installer/redist/vc_redist.x64.exe" -Force
           }
       - name: Build Windows Installer (Inno Setup)
         shell: pwsh
@@ -62,7 +86,9 @@ jobs:
         with:
           name: MirrorNuke-windows-installer
           path: dist/MirrorNuke-Setup.exe
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: MirrorNuke-windows-portable
           path: mirrornuke_app/build/windows/x64/runner/Release
+          if-no-files-found: error
