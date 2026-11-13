@@ -1,0 +1,68 @@
+name: Build MirrorNuke
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/setup_project.py
+      - run: flutter analyze --no-fatal-infos
+        working-directory: mirrornuke_app
+      - run: flutter build apk --release
+        working-directory: mirrornuke_app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorNuke-android-apk
+          path: mirrornuke_app/build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/setup_project.py
+      - run: flutter analyze --no-fatal-infos
+        working-directory: mirrornuke_app
+      - run: flutter build windows --release
+        working-directory: mirrornuke_app
+      - name: Bundle VC++ runtime for clean Windows 10/11 PCs
+        shell: pwsh
+        run: |
+          $rel = "mirrornuke_app/build/windows/x64/runner/Release"
+          foreach ($d in 'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll') {
+            if (Test-Path "C:\Windows\System32\$d") {
+              Copy-Item "C:\Windows\System32\$d" $rel -Force
+            }
+          }
+      - name: Build Windows Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\mirrornuke.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorNuke-windows-installer
+          path: dist/MirrorNuke-Setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorNuke-windows-portable
+          path: mirrornuke_app/build/windows/x64/runner/Release
