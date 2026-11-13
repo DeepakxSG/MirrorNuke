@@ -33,6 +33,15 @@ class AndroidControl {
     }
   }
 
+  /// Makes Android redraw once so a still screen delivers a first video frame.
+  static Future<void> kick() async {
+    try {
+      await _ch.invokeMethod('kick');
+    } catch (e) {
+      AppLog.add('android.kick', e);
+    }
+  }
+
   static Future<void> global(String action) async {
     try {
       await _ch.invokeMethod('global', {'a': action});

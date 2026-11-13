@@ -18,6 +18,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     companion object {
         private const val REQ_AUDIO_PERM = 4101
+        private const val ALLOW_SECOND_PROJECTION = false
         private const val REQ_AUDIO_PROJECTION = 4102
     }
 
@@ -90,8 +91,13 @@ class MainActivity : FlutterActivity() {
                             result.error("capture_service_start_failed", e.message, null)
                         }
                     }
+                    "kick" -> {
+                        svc?.kickFrame()
+                        result.success(svc != null)
+                    }
                     "startAudioCapture" -> {
-                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        // A second MediaProjection stops the first (the screen video). Keep disabled.
+                        if (!ALLOW_SECOND_PROJECTION || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                             result.success(false)
                             return@setMethodCallHandler
                         }

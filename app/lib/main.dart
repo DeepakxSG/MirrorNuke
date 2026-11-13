@@ -477,13 +477,15 @@ class _DashboardPageState extends State<DashboardPage> {
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Stream device audio'),
                   subtitle: Text(Platform.isAndroid
-                      ? 'Captures phone movie/game playback audio for PC speakers'
+                      ? 'Phone audio is not available yet (Android allows only one screen-capture session, and a second one stops the video)'
                       : 'Captures Windows desktop system audio'),
-                  value: _shareAudio,
-                  onChanged: (v) {
-                    setState(() => _shareAudio = v);
-                    _saveSettings(notify: false);
-                  },
+                  value: Platform.isAndroid ? false : _shareAudio,
+                  onChanged: Platform.isAndroid
+                      ? null
+                      : (v) {
+                          setState(() => _shareAudio = v);
+                          _saveSettings(notify: false);
+                        },
                 ),
                 const Divider(),
                 SwitchListTile(
@@ -1319,6 +1321,25 @@ class _RemoteViewState extends State<RemoteView> {
               }),
             ),
             if (!_isFullscreen) Positioned(top: 0, left: 0, right: 0, child: _toolbar()),
+            if (v.os == 'android' && v.remoteControlOk == false)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 12,
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xE6B45309),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'The phone cannot be controlled yet. On the phone: Settings > Accessibility > MirrorNuke > turn on. '
+                    'If it is greyed out (Android 13+ with a sideloaded APK): Settings > Apps > MirrorNuke > three-dot menu > '
+                    'Allow restricted settings, then try again. After installing a new APK, turn it off and on again.',
+                    style: TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+              ),
             if (!_isFullscreen && v.authed && v.videoTrackReceived && !v.firstVideoFrameRendered)
               Positioned(
                 top: 58,

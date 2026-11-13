@@ -135,6 +135,9 @@ class StreamMetrics {
   String qualityLabel = 'Waiting';
 }
 
+/// Keep false: see the comment in ShareSession._capture().
+const bool kAndroidSystemAudio = false;
+
 class Signaling {
   final String url, room, token;
   final String? deviceName, platform;
@@ -299,6 +302,8 @@ class ShareSession extends ChangeNotifier {
   int _prevBytesSent = 0, _prevStatsTs = 0;
 
   bool _authed = false;
+  Timer? _ctlTimer;
+  bool? _lastCtl;
   String _nonce = '';
   String _senderFp = '', _viewerFp = '';
   String? _viewerName;
@@ -396,7 +401,11 @@ class ShareSession extends ChangeNotifier {
       _streams.add(st);
       _names.add('Phone Screen');
 
-      if (shareAudio) {
+      // Android allows ONE active MediaProjection. Starting a second one (the old audio path asked
+      // for a second capture permission) makes Android stop the screen-video capture, which showed
+      // up on the PC as "video track connected, but no frames". Phone audio stays off until it can
+      // share the video capture session.
+      if (kAndroidSystemAudio && shareAudio) {
         final audioOk = await AndroidControl.startAudioCapture();
         if (audioOk) {
           audioActive = true;
@@ -439,12 +448,21 @@ class ShareSession extends ChangeNotifier {
       for (final sender in senders) {
         if (sender.track?.kind == 'video') {
           final params = sender.parameters;
-          params.degradationPreference = RTCDegradationPreference.MAINTAIN_RESOLUTION;
+          // Screen sharing defaults to "keep resolution, drop frames", which feels laggy when the
+          // phone cannot encode a full 1080x2400 frame 30 times a second. For interactive use keep the
+          // frame rate up instead, and send phone screens at a smaller size.
+          final favorSmoothness = Platform.isAndroid || quality == 'gaming';
+          params.degradationPreference = favorSmoothness
+              ? RTCDegradationPreference.MAINTAIN_FRAMERATE
+              : RTCDegradationPreference.MAINTAIN_RESOLUTION;
           final encs = params.encodings;
           if (encs != null && encs.isNotEmpty) {
             for (final enc in encs) {
               enc.maxBitrate = _maxBitrateBps;
               enc.maxFramerate = _targetFps.round();
+              if (Platform.isAndroid) {
+                enc.scaleResolutionDownBy = quality == 'saver' ? 2.5 : 1.5;
+              }
             }
           }
           await sender.setParameters(params);
@@ -648,6 +666,7 @@ class ShareSession extends ChangeNotifier {
       _dcSend({'t': 'auth_ok', 'sp': proof(password, 'S', _nonce, roomKey, _senderFp, _viewerFp)});
       _applySelection();
       _sendInfo();
+      _startCtlReport();
       _set(audioActive ? 'Viewer connected (Video + Audio)' : 'Viewer connected');
     } else {
       _fails++;
@@ -661,6 +680,28 @@ class ShareSession extends ChangeNotifier {
         _dcSend({'t': 'auth_fail', 'left': 5 - _fails});
       }
     }
+  }
+
+  /// Tells the viewer whether this phone can perform remote touches (Accessibility service on).
+  void _startCtlReport() {
+    _ctlTimer?.cancel();
+    _lastCtl = null;
+    if (!Platform.isAndroid) return;
+    Future<void> tick() async {
+      if (_disposed || !_authed) {
+        _ctlTimer?.cancel();
+        return;
+      }
+      final ok = await AndroidControl.isEnabled();
+      if (ok != _lastCtl) {
+        _lastCtl = ok;
+        AppLog.add('share.ctl', 'Accessibility control enabled=$ok');
+        _dcSend({'t': 'ctl', 'ok': ok});
+      }
+    }
+
+    tick();
+    _ctlTimer = Timer.periodic(const Duration(seconds: 3), (_) => tick());
   }
 
   bool _allow() {
@@ -724,6 +765,12 @@ class ShareSession extends ChangeNotifier {
             if (k == 'backspace') WinInput.vk(0x08);
           } else if (k == 'backspace') {
             AndroidControl.backspace();
+          }
+          break;
+        case 'kick':
+          if (Platform.isAndroid) {
+            AppLog.add('share.kick', 'Viewer asked for a fresh frame');
+            AndroidControl.kick();
           }
           break;
         case 'nav':
@@ -797,6 +844,7 @@ class ShareSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _ctlTimer?.cancel();
     _statsTimer?.cancel();
     _androidAudioSub?.cancel();
     for (final s in _streams) {
@@ -850,6 +898,9 @@ class ViewSession extends ChangeNotifier {
   Timer? _videoTrackWatchdog;
   bool videoTrackReceived = false;
   bool firstVideoFrameRendered = false;
+  Timer? _kickTimer;
+  /// null = unknown, false = phone cannot perform touches (Accessibility service off).
+  bool? remoteControlOk;
   String _nonce = '', _senderFp = '', _viewerFp = '';
 
   final WinSpeakerPlayer _winSpeaker = WinSpeakerPlayer();
@@ -896,6 +947,7 @@ class ViewSession extends ChangeNotifier {
     renderer.onResize = () => _notify();
     renderer.onFirstFrameRendered = () {
       firstVideoFrameRendered = true;
+      _kickTimer?.cancel();
       _videoTrackWatchdog?.cancel();
       _set('Video is live');
       AppLog.add('view.video', 'First remote video frame rendered');
@@ -912,6 +964,8 @@ class ViewSession extends ChangeNotifier {
   Future<void> _newPc() async {
     _statsTimer?.cancel();
     _videoTrackWatchdog?.cancel();
+    _kickTimer?.cancel();
+    remoteControlOk = null;
     renderer.srcObject = null;
     await _pc?.close();
     authed = false;
@@ -1169,6 +1223,15 @@ class ViewSession extends ChangeNotifier {
           if (sp is String && constEq(sp, expected)) {
             authed = true;
             _set(videoTrackReceived ? 'Authenticated; preparing phone display...' : 'Authenticated; waiting for phone video track...');
+            // A phone screen that is not changing produces no frames. Ask it to redraw until video starts.
+            _kickTimer?.cancel();
+            _kickTimer = Timer.periodic(const Duration(milliseconds: 1500), (t) {
+              if (_disposed || !authed || firstVideoFrameRendered || t.tick > 10) {
+                t.cancel();
+                return;
+              }
+              sendControl({'t': 'kick'});
+            });
             _videoTrackWatchdog?.cancel();
             _videoTrackWatchdog = Timer(const Duration(seconds: 8), () {
               if (!_disposed && authed && !videoTrackReceived) {
@@ -1182,6 +1245,11 @@ class ViewSession extends ChangeNotifier {
             _set('Could not verify the other device. Connection closed.');
             _pc?.close();
           }
+          break;
+        case 'ctl':
+          remoteControlOk = d['ok'] == true;
+          AppLog.add('view.ctl', 'Remote control available=$remoteControlOk');
+          _notify();
           break;
         case 'auth_fail':
           authed = false;
@@ -1303,6 +1371,7 @@ class ViewSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    _kickTimer?.cancel();
     _disposed = true;
     _statsTimer?.cancel();
     _videoTrackWatchdog?.cancel();

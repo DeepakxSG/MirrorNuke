@@ -2,9 +2,15 @@ package com.mirrornuke.mirrornuke_app
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Color
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
+import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -21,6 +27,31 @@ class RemoteControlService : AccessibilityService() {
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
+
+    /**
+     * Screen capture only produces a frame when something on screen changes. This briefly shows a
+     * 2x2 pixel, almost invisible overlay so Android draws a fresh frame for the viewer.
+     */
+    fun kickFrame() {
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val dot = View(this)
+                dot.setBackgroundColor(Color.argb(10, 0, 0, 0))
+                val lp = WindowManager.LayoutParams(
+                    2, 2,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    PixelFormat.TRANSLUCENT
+                )
+                lp.gravity = Gravity.TOP or Gravity.END
+                wm.addView(dot, lp)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try { wm.removeView(dot) } catch (_: Throwable) {}
+                }, 120)
+            } catch (_: Throwable) {}
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun screenSize(): Pair<Float, Float> {
