@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MirrorNuke</string>
+    <string name="accessibility_service_description">Allows MirrorNuke to perform remote touch gestures, D-pad/navigation actions, and text input when you share your screen.</string>
+</resources>

@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Creates the Flutter project (mirrornuke_app/) and applies all MirrorNuke sources and Android patches.
+Run from the MirrorNuke root folder:  python tools/setup_project.py [--org com.yourname]
+Safe to run multiple times."""
+import os, re, shutil, subprocess, sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APP = os.path.join(ROOT, 'mirrornuke_app')
+ORG = 'com.mirrornuke'
+if '--org' in sys.argv:
+    ORG = sys.argv[sys.argv.index('--org') + 1]
+PKG = f'{ORG}.mirrornuke_app'
+IS_WIN = os.name == 'nt'
+
+def run(cmd, cwd=None):
+    print('>', ' '.join(cmd))
+    subprocess.run(cmd, cwd=cwd, check=True, shell=IS_WIN)
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(text)
+
+def read(path):
+    with open(path, encoding='utf-8') as f:
+        return f.read()
+
+# 1. Create Flutter project
+if not os.path.isdir(APP):
+    run([
+        'flutter', 'create',
+        '--platforms=android,windows',
+        '--org', ORG,
+        '--project-name', 'mirrornuke_app',
+        'mirrornuke_app'
+    ], cwd=ROOT)
+    run([
+        'flutter', 'pub', 'add',
+        'flutter_webrtc',
+        'web_socket_channel',
+        'ffi',
+        'crypto',
+        'shared_preferences',
+        'flutter_secure_storage',
+        'launch_at_startup',
+        'window_manager',
+        'multicast_dns'
+    ], cwd=APP)
+
+# 2. Copy Dart sources & replace default MyApp widget test so flutter analyze passes
+lib = os.path.join(APP, 'lib')
+for f in os.listdir(os.path.join(ROOT, 'app', 'lib')):
+    if f.endswith('.dart'):
+        shutil.copy(os.path.join(ROOT, 'app', 'lib', f), os.path.join(lib, f))
+
+test_file = os.path.join(APP, 'test', 'widget_test.dart')
+write(test_file, """import 'package:flutter_test/flutter_test.dart';
+import 'package:mirrornuke_app/security.dart';
+
+void main() {
+  test('Security validators work', () {
+    expect(validRoom('home-room'), isTrue);
+    expect(validName('pc_1'), isTrue);
+    expect(validPassword('secret123'), isNull);
+  });
+}
+""")
+
+# 3. Copy Kotlin sources & XML resources
+kt_dir = os.path.join(APP, 'android', 'app', 'src', 'main', 'kotlin', *PKG.split('.'))
+os.makedirs(kt_dir, exist_ok=True)
+for f in ('MainActivity.kt', 'RemoteControlService.kt', 'CaptureService.kt'):
+    src = read(os.path.join(ROOT, 'android', f)).replace('package com.mirrornuke.mirrornuke_app', f'package {PKG}')
+    write(os.path.join(kt_dir, f), src)
+
+for dp, _, files_in_dir in os.walk(os.path.join(APP, 'android', 'app', 'src', 'main', 'kotlin')):
+    if 'MainActivity.kt' in files_in_dir and os.path.abspath(dp) != os.path.abspath(kt_dir):
+        os.remove(os.path.join(dp, 'MainActivity.kt'))
+
+res = os.path.join(APP, 'android', 'app', 'src', 'main', 'res')
+os.makedirs(os.path.join(res, 'xml'), exist_ok=True)
+os.makedirs(os.path.join(res, 'values'), exist_ok=True)
+shutil.copy(
+    os.path.join(ROOT, 'android', 'accessibility_service_config.xml'),
+    os.path.join(res, 'xml', 'accessibility_service_config.xml')
+)
+shutil.copy(
+    os.path.join(ROOT, 'android', 'strings.xml'),
+    os.path.join(res, 'values', 'strings.xml')
+)
+
+# 4. Add ProGuard keep rules for WebRTC so release APKs preserve native WebRTC classes
+proguard_path = os.path.join(APP, 'android', 'app', 'proguard-rules.pro')
+write(proguard_path, """-keep class org.webrtc.** { *; }
+-keep class com.cloudwebrtc.webrtc.** { *; }
+-dontwarn org.webrtc.**
+""")
+
+# 5. Patch AndroidManifest.xml
+mf = os.path.join(APP, 'android', 'app', 'src', 'main', 'AndroidManifest.xml')
+s = read(mf)
+if 'mirrornuke-patched' not in s:
+    perms = """    <!-- mirrornuke-patched -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-feature android:name="android.software.leanback" android:required="false"/>
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+"""
+    s = s.replace('<application', perms + '    <application', 1)
+    if 'usesCleartextTraffic' not in s:
+        s = s.replace('<application', '<application\n        android:usesCleartextTraffic="true"', 1)
+    s = re.sub(
+        r'(<category android:name="android.intent.category.LAUNCHER"\s*/>)',
+        r'\1\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>',
+        s,
+        count=1
+    )
+    services = """
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"/>
+        <service
+            android:name=".RemoteControlService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config"/>
+        </service>
+"""
+    s = s.replace('</application>', services + '    </application>', 1)
+    write(mf, s)
+
+# 6. Ensure minSdk 24
+for name in ('build.gradle.kts', 'build.gradle'):
+    p = os.path.join(APP, 'android', 'app', name)
+    if os.path.exists(p):
+        g = read(p)
+        g = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', g)
+        g = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', g)
+        write(p, g)
+
+print('\nMirrorNuke project setup complete.')
+print('Next steps:')
+print('  cd mirrornuke_app')
+print('  flutter build windows --release')
+print('  flutter build apk --release')

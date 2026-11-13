@@ -1,0 +1,12 @@
+{
+  "name": "mirrornuke-signaling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MirrorNuke WebRTC signaling and room-scoped device directory server",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
