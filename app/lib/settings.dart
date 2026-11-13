@@ -25,14 +25,27 @@ class Settings {
   static const _sec = FlutterSecureStorage();
 
   static Future<Settings> load({required String defMe, required String defOther}) async {
-    final p = await SharedPreferences.getInstance();
-    var password = '', token = '';
-    try {
-      password = await _sec.read(key: 'password') ?? '';
-      token = await _sec.read(key: 'token') ?? '';
-    } catch (e) {
-      AppLog.add('settings.load', e);
-    }
+    final loadTimer = Stopwatch()..start();
+    // Preferences and secure-storage reads are independent. Start them at the
+    // same time so app startup does not wait for two sequential plugin calls.
+    final prefsFuture = SharedPreferences.getInstance();
+    final credentialsFuture = () async {
+      try {
+        return await Future.wait<String?>([
+          _sec.read(key: 'password'),
+          _sec.read(key: 'token'),
+        ]);
+      } catch (e) {
+        AppLog.add('settings.load', e);
+        return <String?>[null, null];
+      }
+    }();
+
+    final p = await prefsFuture;
+    final credentials = await credentialsFuture;
+    final password = credentials.isNotEmpty ? credentials[0] ?? '' : '';
+    final token = credentials.length > 1 ? credentials[1] ?? '' : '';
+    AppLog.add('startup.settings', 'Preferences and secure storage loaded in ${loadTimer.elapsedMilliseconds} ms');
     return Settings(
       server: p.getString('server') ?? 'ws://192.168.1.10:8080',
       token: token,

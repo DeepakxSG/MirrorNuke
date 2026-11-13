@@ -1,4 +1,4 @@
-# MirrorNuke
+**Current source patch: 2.0.4** — fixes the Windows remote-video stream attachment path, brings up a visible startup screen before asynchronous settings load, and loads independent preferences/secure-storage values concurrently. Retains local preview pinch-zoom, pan, zoom-aware remote input, and immersive full-screen viewing.
 
 **Current source patch: 2.0.3** — retains the Windows remote-video receiver and Android capture-startup fixes, and adds local preview pinch-zoom/pan plus a HUD-free full-screen viewer. Version 2.0.3 fixes nullable WebRTC track IDs and removes the redundant Matrix4 import. See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for blank-preview diagnostics and [ZOOM_FULLSCREEN_GUIDE.md](ZOOM_FULLSCREEN_GUIDE.md) for the new viewer controls.
 
@@ -68,3 +68,7 @@ The remote viewer now supports local two-finger preview zoom/pan, coordinate-cor
 - Removed the redundant direct `vector_math` import and dependency; `Matrix4` is already exported by Flutter's gestures library used by the viewer.
 - Updated the Windows installer version to 2.0.3.
 - Updated GitHub Actions to also validate pull requests, use read-only repository permissions, name each validation/build step clearly, and retain build artifacts for 14 days.
+
+## Version 2.0.4: startup feedback and remote-video receiver fix
+
+The app renders its first Flutter frame before awaiting saved settings, so users see a branded startup panel instead of a blank white window. The panel reports real initialization stages and offers a retry if settings initialization fails. Shared preferences and secure-storage reads now begin concurrently. The Windows viewer reuses actual remote MediaStreams from the WebRTC event/peer connection and no longer calls `MediaStream.addTrack()` with an already-received remote track.

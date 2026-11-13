@@ -847,7 +847,6 @@ class ViewSession extends ChangeNotifier {
   final List<String> _order = [];
   final Set<String> _attachedTrackIds = <String>{};
   final List<RTCIceCandidate> _pendingIce = [];
-  MediaStream? _fallbackRemoteStream;
   Timer? _videoTrackWatchdog;
   bool videoTrackReceived = false;
   bool firstVideoFrameRendered = false;
@@ -914,11 +913,6 @@ class ViewSession extends ChangeNotifier {
     _statsTimer?.cancel();
     _videoTrackWatchdog?.cancel();
     renderer.srcObject = null;
-    final oldFallback = _fallbackRemoteStream;
-    _fallbackRemoteStream = null;
-    if (oldFallback != null) {
-      try { await oldFallback.dispose(); } catch (_) {}
-    }
     await _pc?.close();
     authed = false;
     _remoteDescSet = false;
@@ -1007,14 +1001,6 @@ class ViewSession extends ChangeNotifier {
         : 'identity:${identityHashCode(track)}';
   }
 
-  bool _streamContainsTrack(MediaStream stream, MediaStreamTrack track) {
-    final id = track.id;
-    return stream.getTracks().any((existing) {
-      if (identical(existing, track)) return true;
-      return id != null && id.isNotEmpty && existing.id == id;
-    });
-  }
-
   void _registerRemoteStream(MediaStream stream) {
     if (_disposed) return;
     if (!_byId.containsKey(stream.id)) _order.add(stream.id);
@@ -1037,34 +1023,38 @@ class ViewSession extends ChangeNotifier {
 
   Future<void> _attachRemoteTrack(MediaStreamTrack track, List<MediaStream> eventStreams) async {
     final attachmentKey = _trackAttachmentKey(track);
-    if (_disposed || !_attachedTrackIds.add(attachmentKey)) return;
-    if (track.kind == 'video') {
-      videoTrackReceived = true;
-      firstVideoFrameRendered = false;
-    }
+    if (_disposed || _attachedTrackIds.contains(attachmentKey)) return;
+
     try {
-      if (eventStreams.isNotEmpty) {
-        for (final stream in eventStreams) {
-          if (!_streamContainsTrack(stream, track)) {
-            await stream.addTrack(track);
-          }
-          _registerRemoteStream(stream);
-        }
-      } else {
-        // Streamless tracks are valid in Unified Plan. Build one receiver-side
-        // stream and add each streamless track to it so RTCVideoRenderer can use it.
-        final fallback = _fallbackRemoteStream ??=
-            await createLocalMediaStream('mirrornuke-remote-$target');
-        if (!_streamContainsTrack(fallback, track)) {
-          await fallback.addTrack(track);
-        }
-        _registerRemoteStream(fallback);
+      // Do not call MediaStream.addTrack() for an already-received remote
+      // track. Native flutter_webrtc keeps remote tracks in the peer
+      // connection's remote streams, not in the local-track registry used by
+      // MediaStream.addTrack(). Reuse the actual stream objects supplied by
+      // onTrack, or query the peer connection if the event is streamless.
+      var remoteStreams = eventStreams;
+      if (remoteStreams.isEmpty) {
+        final peerStreams = _pc?.getRemoteStreams() ?? const <MediaStream?>[];
+        remoteStreams = peerStreams.whereType<MediaStream>().toList();
       }
 
+      if (remoteStreams.isEmpty) {
+        AppLog.add('view.track', 'Remote ${track.kind} track ${track.id} arrived without an exposed MediaStream; waiting for remote stream mapping');
+        _set(track.kind == 'video'
+            ? 'Video track received; waiting for its remote stream…'
+            : 'Audio track received; waiting for its remote stream…');
+        return;
+      }
+
+      for (final stream in remoteStreams) {
+        _registerRemoteStream(stream);
+      }
+
+      _attachedTrackIds.add(attachmentKey);
       if (track.kind == 'video') {
         track.enabled = true;
-        videoTrackReceived = true;
-        _set('Video track received; waiting for first frame...');
+        if (!videoTrackReceived) {
+          _set('Video track attached; waiting for first frame…');
+        }
         _videoTrackWatchdog?.cancel();
         _videoTrackWatchdog = Timer(const Duration(seconds: 8), () {
           if (!_disposed && videoTrackReceived && !firstVideoFrameRendered) {
@@ -1074,12 +1064,11 @@ class ViewSession extends ChangeNotifier {
       } else if (track.kind == 'audio') {
         remoteAudioEnabled = true;
       }
-      AppLog.add('view.track', 'Remote ${track.kind} track ${track.id}; event streams=${eventStreams.length}');
+      AppLog.add('view.track', 'Remote ${track.kind} track ${track.id}; event streams=${eventStreams.length}, registered=${remoteStreams.length}');
       _show();
     } catch (e) {
-      _attachedTrackIds.remove(attachmentKey);
       AppLog.add('view.track.attach', e);
-      _set('Received a remote track but could not attach it to the viewer: $e');
+      _set('Received a remote track, but its remote stream is not ready yet: $e');
     }
   }
 
@@ -1087,6 +1076,15 @@ class ViewSession extends ChangeNotifier {
     final pc = _pc;
     if (pc == null || _disposed) return;
     try {
+      // Unified Plan streams are retained by RTCPeerConnection. Read those
+      // native remote streams instead of manufacturing a local stream and
+      // trying to insert a remote track into it.
+      final streams = pc.getRemoteStreams().whereType<MediaStream>().toList();
+      for (final stream in streams) {
+        _registerRemoteStream(stream);
+      }
+      if (videoTrackReceived) return;
+
       final receivers = await pc.getReceivers();
       for (final receiver in receivers) {
         final track = receiver.track;
@@ -1313,9 +1311,6 @@ class ViewSession extends ChangeNotifier {
     renderer.srcObject = null;
     _pc?.close();
     _sig.close();
-    final fallback = _fallbackRemoteStream;
-    _fallbackRemoteStream = null;
-    if (fallback != null) fallback.dispose();
     renderer.dispose();
     super.dispose();
   }

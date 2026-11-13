@@ -36,6 +36,13 @@ if not os.path.isdir(APP):
         'mirrornuke_app'
     ], cwd=ROOT)
 
+# Give the native Windows window the same product name shown in the Flutter UI.
+windows_runner_main = os.path.join(APP, 'windows', 'runner', 'main.cpp')
+if os.path.isfile(windows_runner_main):
+    runner_source = read(windows_runner_main)
+    runner_source = runner_source.replace('L"mirrornuke_app"', 'L"MirrorNuke"')
+    write(windows_runner_main, runner_source)
+
 shutil.copy(os.path.join(TEMPLATES, 'pubspec.yaml'), os.path.join(APP, 'pubspec.yaml'))
 shutil.copy(os.path.join(TEMPLATES, 'analysis_options.yaml'), os.path.join(APP, 'analysis_options.yaml'))
 run(['flutter', 'pub', 'get'], cwd=APP)

@@ -50,11 +50,15 @@ The navigation controls use a WebRTC data channel, while the picture uses a sepa
 See `VIDEO_TROUBLESHOOTING.md` for the full explanation and diagnostic-log collection steps.
 
 
-## E) Local zoom and full-screen viewer (2.0.2)
+## E) Local zoom and full-screen viewer (introduced in 2.0.2)
 
-See `ZOOM_FULLSCREEN_GUIDE.md` for pinch-zoom, preview pan, zoom reset, full-screen shortcuts, and the recommended hardware test sequence. Version 2.0.3 fixes nullable WebRTC track IDs and removes the redundant `vector_math` import. Rerun `python tools/setup_project.py` so the generated Flutter project receives the updated sources and dependencies before building.
+See `ZOOM_FULLSCREEN_GUIDE.md` for pinch-zoom, preview pan, zoom reset, full-screen shortcuts, and the recommended hardware test sequence. These viewer features are preserved in 2.0.4. Rerun `python tools/setup_project.py` so the generated Flutter project receives the current source and dependency templates before building.
 
+## F) MirrorNuke 2.0.4 startup and remote-video update
 
-## F) CI failure at `sessions.dart` line 1022 (2.0.3 fix)
+- The first Flutter frame now displays a branded startup panel before saved settings finish loading.
+- Settings and secure-storage values are loaded concurrently. The startup panel shows an indeterminate progress bar, not a fabricated percentage.
+- The Windows dashboard title is set to `MirrorNuke`.
+- The viewer no longer calls `MediaStream.addTrack()` with a remote WebRTC track. It registers actual remote streams delivered by WebRTC and polls the peer connection for remote streams when needed.
 
-If GitHub Actions reports `String?` cannot be assigned to `String`, make sure the repository contains the 2.0.3 `app/lib/sessions.dart`, `app/lib/main.dart`, and `tools/templates/pubspec.yaml`. The receiver now uses the native track ID when available and `identityHashCode(track)` when it is absent. Do not make analysis non-fatal to hide this error; `flutter analyze --no-fatal-infos` should remain a required CI gate.
+See `STARTUP_AND_VIDEO_TESTING.md` for the recommended Windows startup and phone-to-PC video test sequence.

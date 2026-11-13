@@ -22,8 +22,13 @@
 - Exit by Esc/F11 on Windows or the temporary on-screen exit control.
 
 
-## Version 2.0.3 CI fix
+## Version 2.0.4 startup and video update
 
-- Android and Windows CI now compile the null-safe remote track attachment logic.
-- The redundant explicit `vector_math` dependency has been removed.
-- The Windows installer reports version 2.0.3.
+- Branded loading screen is shown before settings and secure-storage initialization completes.
+- Independent preferences and credential reads run concurrently.
+- Startup timing is written to diagnostic logs to help identify slow initialization.
+- Windows viewer registers real WebRTC remote streams and avoids `MediaStream.addTrack()` on already-received remote tracks.
+- Preserves preview zoom, zoom-aware controls, full-screen viewing, multi-monitor controls, and existing navigation controls.
+- Windows installer and Android package version are updated to 2.0.4.
+
+Before publishing, wait for Android and Windows GitHub Actions jobs to pass, then attach the generated APK, Windows installer, and portable ZIP to the GitHub Release.

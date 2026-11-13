@@ -1,7 +1,7 @@
 ; Inno Setup script: per-user install (no admin needed), Windows 10 and 11, 64-bit.
 [Setup]
 AppName=MirrorNuke
-AppVersion=2.0.3
+AppVersion=2.0.4
 AppPublisher=MirrorNuke
 DefaultDirName={autopf}\MirrorNuke
 DefaultGroupName=MirrorNuke

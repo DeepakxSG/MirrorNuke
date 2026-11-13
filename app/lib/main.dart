@@ -16,27 +16,173 @@ import 'win_input.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
-  final auto = args.contains('--autostart');
-  if (Platform.isWindows) {
-    Startup.setup();
+  // Paint the first Flutter frame immediately. Preferences and secure storage
+  // are loaded by StartupGate after the loading UI is already visible.
+  runApp(MirrorNukeApp(autostart: args.contains('--autostart')));
+}
+
+class MirrorNukeApp extends StatelessWidget {
+  final bool autostart;
+  const MirrorNukeApp({super.key, required this.autostart});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'MirrorNuke',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: const Color(0xFF4F46E5),
+        brightness: Brightness.dark,
+      ),
+      home: StartupGate(autostart: autostart),
+    );
+  }
+}
+
+class StartupGate extends StatefulWidget {
+  final bool autostart;
+  const StartupGate({super.key, required this.autostart});
+
+  @override
+  State<StartupGate> createState() => _StartupGateState();
+}
+
+class _StartupGateState extends State<StartupGate> {
+  Settings? _settings;
+  Object? _error;
+  String _phase = 'Preparing MirrorNuke…';
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Let Flutter paint the loading screen before running even synchronous
+    // startup hooks, so the native window is not left blank while they run.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      WinInput.configureWindow(minimize: auto);
+      if (!mounted) return;
+      AppLog.add('startup.ui', 'Startup screen first frame displayed');
+      unawaited(_load());
     });
   }
-  final s = await Settings.load(
-    defMe: Platform.isWindows ? 'pc' : 'phone',
-    defOther: Platform.isWindows ? 'phone' : 'pc',
-  );
-  runApp(MaterialApp(
-    debugShowCheckedModeBanner: false,
-    title: 'MirrorNuke',
-    theme: ThemeData(
-      useMaterial3: true,
-      colorSchemeSeed: const Color(0xFF4F46E5),
-      brightness: Brightness.dark,
-    ),
-    home: DashboardPage(settings: s, autostart: auto),
-  ));
+
+  Future<void> _load() async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _phase = Platform.isWindows
+          ? 'Preparing Windows startup integration…'
+          : 'Preparing application services…';
+    });
+    final startupTimer = Stopwatch()..start();
+    try {
+      if (Platform.isWindows) {
+        Startup.setup();
+      }
+      if (!mounted) return;
+      setState(() => _phase = 'Loading saved preferences…');
+      final settings = await Settings.load(
+        defMe: Platform.isWindows ? 'pc' : 'phone',
+        defOther: Platform.isWindows ? 'phone' : 'pc',
+      );
+      AppLog.add('startup.bootstrap', 'Settings ready after ${startupTimer.elapsedMilliseconds} ms');
+      if (!mounted) return;
+      setState(() {
+        _settings = settings;
+        _phase = 'Opening dashboard…';
+        _loading = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && Platform.isWindows) {
+          WinInput.configureWindow(minimize: widget.autostart);
+        }
+      });
+    } catch (e) {
+      AppLog.add('startup.bootstrap', e);
+      if (!mounted) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = _settings;
+    if (settings != null) {
+      return DashboardPage(settings: settings, autostart: widget.autostart);
+    }
+
+    return Scaffold(
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF101426), Color(0xFF090B12), Color(0xFF17152D)],
+          ),
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 430),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 76,
+                    height: 76,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF4F46E5).withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(color: const Color(0xFF818CF8).withOpacity(0.4)),
+                    ),
+                    child: const Icon(Icons.cast_connected_rounded, size: 40, color: Color(0xFFA5B4FC)),
+                  ),
+                  const SizedBox(height: 22),
+                  const Text(
+                    'MirrorNuke',
+                    style: TextStyle(fontSize: 29, fontWeight: FontWeight.w700, letterSpacing: 0.3),
+                  ),
+                  const SizedBox(height: 7),
+                  Text('VERSION 2.0.4', style: TextStyle(fontSize: 11, letterSpacing: 2.2, color: Colors.white.withOpacity(0.48))),
+                  const SizedBox(height: 34),
+                  if (_error == null) ...[
+                    const SizedBox(
+                      width: double.infinity,
+                      child: LinearProgressIndicator(minHeight: 3),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(_phase, textAlign: TextAlign.center, style: const TextStyle(fontSize: 14, color: Colors.white70)),
+                    const SizedBox(height: 8),
+                    Text('Getting things ready. This window will continue automatically.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.42))),
+                  ] else ...[
+                    const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent, size: 30),
+                    const SizedBox(height: 12),
+                    const Text('MirrorNuke could not finish starting.', textAlign: TextAlign.center),
+                    const SizedBox(height: 8),
+                    Text('$_error', textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: _loading ? null : _load,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Try again'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class DashboardPage extends StatefulWidget {
