@@ -129,7 +129,7 @@ if 'mirrornuke-patched' not in s:
     s = s.replace('</application>', services + '    </application>', 1)
     write(mf, s)
 
-# 6. Ensure minSdk 24
+# 6. Ensure minSdk 24 in app build.gradle(.kts) and compileSdk >= 35 for Android library plugins (e.g. flutter_webrtc)
 for name in ('build.gradle.kts', 'build.gradle'):
     p = os.path.join(APP, 'android', 'app', name)
     if os.path.exists(p):
@@ -137,6 +137,51 @@ for name in ('build.gradle.kts', 'build.gradle'):
         g = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', g)
         g = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', g)
         write(p, g)
+
+root_kts = os.path.join(APP, 'android', 'build.gradle.kts')
+if os.path.exists(root_kts):
+    rk = read(root_kts)
+    if 'mirrornuke-compile-sdk' not in rk:
+        hook = '''// mirrornuke-compile-sdk
+subprojects {
+    plugins.withId("com.android.library") {
+        project.afterEvaluate {
+            extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
+                compileSdk = 35
+            }
+        }
+    }
+}
+
+'''
+        if 'subprojects {' in rk:
+            rk = rk.replace('subprojects {', hook + 'subprojects {', 1)
+        else:
+            rk = rk + '\n' + hook
+        write(root_kts, rk)
+
+root_groovy = os.path.join(APP, 'android', 'build.gradle')
+if os.path.exists(root_groovy):
+    rg = read(root_groovy)
+    if 'mirrornuke-compile-sdk' not in rg:
+        hook_g = '''// mirrornuke-compile-sdk
+subprojects {
+    plugins.withId("com.android.library") {
+        project.afterEvaluate {
+            android {
+                compileSdkVersion 35
+            }
+        }
+    }
+}
+
+'''
+        if 'subprojects {' in rg:
+            rg = rg.replace('subprojects {', hook_g + 'subprojects {', 1)
+        else:
+            rg = rg + '\n' + hook_g
+        write(root_groovy, rg)
+
 
 print('\nMirrorNuke project setup complete.')
 print('Next steps:')
