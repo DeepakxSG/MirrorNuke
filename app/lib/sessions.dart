@@ -373,9 +373,6 @@ class ShareSession extends ChangeNotifier {
             'audio': false,
           });
         }
-        for (final vt in st.getVideoTracks()) {
-          vt.contentHint = 'detail';
-        }
         _streams.add(st);
         _names.add(s.name);
       }
@@ -385,9 +382,6 @@ class ShareSession extends ChangeNotifier {
       await AndroidControl.startCaptureService();
       await Future.delayed(const Duration(milliseconds: 300));
       final st = await navigator.mediaDevices.getDisplayMedia({'video': true});
-      for (final vt in st.getVideoTracks()) {
-        vt.contentHint = 'detail';
-      }
       _streams.add(st);
       _names.add('Phone Screen');
 

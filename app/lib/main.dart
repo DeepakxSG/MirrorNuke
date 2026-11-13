@@ -259,7 +259,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   const SizedBox(height: 12),
                   AnimatedBuilder(
                     animation: _localServer,
-                    builder: (_, _) => Container(
+                    builder: (ctx, child) => Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
                         color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -405,7 +405,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget _buildDevicesTab() {
     return AnimatedBuilder(
       animation: _directory,
-      builder: (_, _) => ListView(
+      builder: (ctx, child) => ListView(
         padding: const EdgeInsets.all(20),
         children: [
           Row(
@@ -695,7 +695,7 @@ class _LinkPageState extends State<LinkPage> {
             Center(
               child: AnimatedBuilder(
                 animation: _share!,
-                builder: (_, _) => Column(
+                builder: (ctx, child) => Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Padding(
@@ -735,7 +735,7 @@ class _LinkPageState extends State<LinkPage> {
               bottom: 10,
               child: AnimatedBuilder(
                 animation: _share!,
-                builder: (_, _) => Container(
+                builder: (ctx, child) => Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
                   child: Text(
@@ -893,7 +893,7 @@ class _RemoteViewState extends State<RemoteView> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: v,
-      builder: (_, _) => Stack(
+      builder: (ctx, child) => Stack(
         children: [
           Positioned.fill(
             child: LayoutBuilder(builder: (ctx, c) {
