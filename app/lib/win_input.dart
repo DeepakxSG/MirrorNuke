@@ -15,6 +15,15 @@ final class _WinRect extends Struct {
   external int bottom;
 }
 
+final class _MonitorInfo extends Struct {
+  @Uint32()
+  external int cbSize;
+  external _WinRect rcMonitor;
+  external _WinRect rcWork;
+  @Uint32()
+  external int dwFlags;
+}
+
 final class _MouseInput extends Struct {
   @Int32()
   external int dx;
@@ -115,6 +124,17 @@ typedef _SetWindowPosDart = int Function(
 typedef _ShowWindowNative = Int32 Function(IntPtr hWnd, Int32 nCmdShow);
 typedef _ShowWindowDart = int Function(int hWnd, int nCmdShow);
 
+typedef _GetWindowLongPtrNative = IntPtr Function(IntPtr hWnd, Int32 nIndex);
+typedef _GetWindowLongPtrDart = int Function(int hWnd, int nIndex);
+typedef _SetWindowLongPtrNative = IntPtr Function(IntPtr hWnd, Int32 nIndex, IntPtr value);
+typedef _SetWindowLongPtrDart = int Function(int hWnd, int nIndex, int value);
+typedef _GetWindowRectNative = Int32 Function(IntPtr hWnd, Pointer<_WinRect> rect);
+typedef _GetWindowRectDart = int Function(int hWnd, Pointer<_WinRect> rect);
+typedef _MonitorFromWindowNative = IntPtr Function(IntPtr hWnd, Uint32 flags);
+typedef _MonitorFromWindowDart = int Function(int hWnd, int flags);
+typedef _GetMonitorInfoNative = Int32 Function(IntPtr monitor, Pointer<_MonitorInfo> info);
+typedef _GetMonitorInfoDart = int Function(int monitor, Pointer<_MonitorInfo> info);
+
 final List<Rect> _mons = [];
 
 int _enumCb(int hMonitor, int hdc, Pointer<_WinRect> r, int data) {
@@ -136,7 +156,16 @@ class WinInput {
   static late _GetForegroundWindowDart _getForegroundWindow;
   static late _SetWindowPosDart _setWindowPos;
   static late _ShowWindowDart _showWindow;
+  static late _GetWindowLongPtrDart _getWindowLongPtr;
+  static late _SetWindowLongPtrDart _setWindowLongPtr;
+  static late _GetWindowRectDart _getWindowRect;
+  static late _MonitorFromWindowDart _monitorFromWindow;
+  static late _GetMonitorInfoDart _getMonitorInfo;
   static bool _bound = false;
+
+  static int _fullscreenHwnd = 0;
+  static int _savedWindowStyle = 0;
+  static Rect? _savedWindowRect;
 
   static List<Rect> _cache = [];
   static int _cacheAt = 0;
@@ -155,6 +184,11 @@ class WinInput {
           _user32!.lookupFunction<_GetForegroundWindowNative, _GetForegroundWindowDart>('GetForegroundWindow');
       _setWindowPos = _user32!.lookupFunction<_SetWindowPosNative, _SetWindowPosDart>('SetWindowPos');
       _showWindow = _user32!.lookupFunction<_ShowWindowNative, _ShowWindowDart>('ShowWindow');
+      _getWindowLongPtr = _user32!.lookupFunction<_GetWindowLongPtrNative, _GetWindowLongPtrDart>('GetWindowLongPtrW');
+      _setWindowLongPtr = _user32!.lookupFunction<_SetWindowLongPtrNative, _SetWindowLongPtrDart>('SetWindowLongPtrW');
+      _getWindowRect = _user32!.lookupFunction<_GetWindowRectNative, _GetWindowRectDart>('GetWindowRect');
+      _monitorFromWindow = _user32!.lookupFunction<_MonitorFromWindowNative, _MonitorFromWindowDart>('MonitorFromWindow');
+      _getMonitorInfo = _user32!.lookupFunction<_GetMonitorInfoNative, _GetMonitorInfoDart>('GetMonitorInfoW');
       _bound = true;
       return true;
     } catch (e) {
@@ -175,6 +209,77 @@ class WinInput {
       }
     } catch (e) {
       AppLog.add('winInput.configureWindow', e);
+    }
+  }
+
+  /// Makes the active MirrorNuke window borderless and fits it to its current
+  /// monitor. The original style and rectangle are restored on exit.
+  static void setViewerFullscreen(bool enabled) {
+    if (!_ensureBound()) return;
+    try {
+      if (enabled) {
+        if (_fullscreenHwnd != 0) return;
+        final hwnd = _getForegroundWindow();
+        if (hwnd == 0) return;
+        final rectPtr = calloc<_WinRect>();
+        final infoPtr = calloc<_MonitorInfo>();
+        try {
+          if (_getWindowRect(hwnd, rectPtr) == 0) return;
+          final originalRect = Rect.fromLTRB(
+            rectPtr.ref.left.toDouble(),
+            rectPtr.ref.top.toDouble(),
+            rectPtr.ref.right.toDouble(),
+            rectPtr.ref.bottom.toDouble(),
+          );
+          final originalStyle = _getWindowLongPtr(hwnd, -16); // GWL_STYLE
+          var target = originalRect;
+          final monitor = _monitorFromWindow(hwnd, 2); // MONITOR_DEFAULTTONEAREST
+          if (monitor != 0) {
+            infoPtr.ref.cbSize = sizeOf<_MonitorInfo>();
+            if (_getMonitorInfo(monitor, infoPtr) != 0) {
+              final r = infoPtr.ref.rcMonitor;
+              target = Rect.fromLTRB(r.left.toDouble(), r.top.toDouble(), r.right.toDouble(), r.bottom.toDouble());
+            }
+          }
+          _fullscreenHwnd = hwnd;
+          _savedWindowStyle = originalStyle;
+          _savedWindowRect = originalRect;
+          const overlappedWindow = 0x00CF0000;
+          const popup = 0x80000000;
+          _setWindowLongPtr(hwnd, -16, (originalStyle & ~overlappedWindow) | popup);
+          _setWindowPos(
+            hwnd,
+            0,
+            target.left.round(),
+            target.top.round(),
+            target.width.round(),
+            target.height.round(),
+            0x0020 | 0x0004 | 0x0200, // SWP_FRAMECHANGED | NOZORDER | NOOWNERZORDER
+          );
+        } finally {
+          calloc.free(rectPtr);
+          calloc.free(infoPtr);
+        }
+      } else {
+        final hwnd = _fullscreenHwnd;
+        final rect = _savedWindowRect;
+        if (hwnd == 0 || rect == null) return;
+        _setWindowLongPtr(hwnd, -16, _savedWindowStyle);
+        _setWindowPos(
+          hwnd,
+          0,
+          rect.left.round(),
+          rect.top.round(),
+          rect.width.round(),
+          rect.height.round(),
+          0x0020 | 0x0004 | 0x0200,
+        );
+        _fullscreenHwnd = 0;
+        _savedWindowStyle = 0;
+        _savedWindowRect = null;
+      }
+    } catch (e) {
+      AppLog.add('winInput.fullscreen', e);
     }
   }
 

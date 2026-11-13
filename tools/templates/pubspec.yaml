@@ -1,7 +1,7 @@
 name: mirrornuke_app
 description: Private, one-click screen + stereo audio casting and remote control.
 publish_to: 'none'
-version: 2.0.0+1
+version: 2.0.2+3
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -17,6 +17,7 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   launch_at_startup: ^0.3.1
   multicast_dns: ^0.3.2+7
+  vector_math: ^2.1.4
 
 dev_dependencies:
   flutter_test:

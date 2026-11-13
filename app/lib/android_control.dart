@@ -57,9 +57,17 @@ class AndroidControl {
     }
   }
 
-  static Future<void> startCaptureService() async {
-    if (!Platform.isAndroid) return;
-    await _ch.invokeMethod('startCapture');
+  static Future<bool> startCaptureService() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      return await _ch
+              .invokeMethod<bool>('startCapture')
+              .timeout(const Duration(seconds: 8)) ??
+          false;
+    } catch (e) {
+      AppLog.add('android.startCaptureService', e);
+      return false;
+    }
   }
 
   static Future<bool> startAudioCapture() async {

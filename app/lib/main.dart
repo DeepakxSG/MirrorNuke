@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:vector_math/vector_math_64.dart' show Matrix4;
 import 'android_control.dart';
 import 'embedded_server.dart';
 import 'lan_discovery.dart';
@@ -222,6 +224,14 @@ class _DashboardPageState extends State<DashboardPage> {
               Navigator.pop(ctx);
             },
             child: const Text('Clear'),
+          ),
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: logs.join('\n')));
+              Navigator.pop(ctx);
+              _snack('Diagnostic log copied');
+            },
+            child: const Text('Copy log'),
           ),
           FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
         ],
@@ -764,7 +774,37 @@ class _RemoteViewState extends State<RemoteView> {
   int _mode = 0;
   int _btn = 0;
   int _lastMove = 0;
+  final TransformationController _zoomController = TransformationController();
+  final Set<int> _touchPointers = <int>{};
+  final FocusNode _keyboardFocus = FocusNode(debugLabel: 'MirrorNuke remote viewer');
+  Matrix4? _scaleStartMatrix;
+  Offset _scaleStartFocal = Offset.zero;
+  double _scaleStartGestureValue = 1.0;
+  bool _scaleGestureActive = false;
+  bool _pinchInProgress = false;
+  bool _remoteTouchDown = false;
+  Offset? _lastRemoteTouchPosition;
+  bool _isFullscreen = false;
+  bool _showFullscreenExit = false;
+  Timer? _fullscreenHudTimer;
+  Size? _lastViewportSize;
+
   ViewSession get v => widget.view;
+  double get _zoomScale => _zoomController.value.getMaxScaleOnAxis().clamp(1.0, 5.0).toDouble();
+
+  @override
+  void dispose() {
+    _fullscreenHudTimer?.cancel();
+    if (_isFullscreen) {
+      if (Platform.isWindows) WinInput.setViewerFullscreen(false);
+      if (Platform.isAndroid) {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
+    }
+    _zoomController.dispose();
+    _keyboardFocus.dispose();
+    super.dispose();
+  }
 
   Offset? _norm(Offset p, Size box) {
     final vw = v.renderer.videoWidth.toDouble();
@@ -776,8 +816,12 @@ class _RemoteViewState extends State<RemoteView> {
     return Offset(((p.dx - ox) / w).clamp(0.0, 1.0), ((p.dy - oy) / h).clamp(0.0, 1.0));
   }
 
-  void _ptr(String a, PointerEvent e, Size box) {
-    final n = _norm(e.localPosition, box);
+  void _ptr(String a, PointerEvent e, Size box, {Offset? viewportPosition}) {
+    final viewportPoint = viewportPosition ?? e.localPosition;
+    // Convert the pointer from the zoomed viewport back into the unscaled
+    // video canvas. Only the local viewer is transformed; the remote PC is not.
+    final scenePoint = _zoomController.toScene(viewportPoint);
+    final n = _norm(scenePoint, box);
     if (n == null) return;
     final isMouse = e.kind == PointerDeviceKind.mouse;
     if (a == 'down') {
@@ -797,6 +841,164 @@ class _RemoteViewState extends State<RemoteView> {
       _lastMove = now;
     }
     v.sendControl({'t': 'mouse', 'a': a, 'x': n.dx, 'y': n.dy, 'b': _btn});
+  }
+
+  void _pointerDown(PointerDownEvent e, Size box) {
+    if (e.kind == PointerDeviceKind.touch) {
+      _touchPointers.add(e.pointer);
+      if (_touchPointers.length >= 2) {
+        // A two-finger gesture is reserved for local zoom/pan. Release any
+        // one-finger remote press so it cannot become stuck while pinching.
+        if (_remoteTouchDown) {
+          _ptr('up', e, box, viewportPosition: _lastRemoteTouchPosition);
+          _remoteTouchDown = false;
+        }
+        _pinchInProgress = true;
+        return;
+      }
+      _remoteTouchDown = true;
+      _lastRemoteTouchPosition = e.localPosition;
+    }
+    if (!_pinchInProgress) _ptr('down', e, box);
+  }
+
+  void _pointerMove(PointerMoveEvent e, Size box) {
+    if (e.kind == PointerDeviceKind.touch && _pinchInProgress) return;
+    if (e.kind == PointerDeviceKind.touch) _lastRemoteTouchPosition = e.localPosition;
+    _ptr('move', e, box);
+  }
+
+  void _pointerUp(PointerEvent e, Size box) {
+    if (e.kind == PointerDeviceKind.touch) {
+      if (_pinchInProgress) {
+        _touchPointers.remove(e.pointer);
+        if (_touchPointers.isEmpty) {
+          _pinchInProgress = false;
+          _remoteTouchDown = false;
+          _scaleGestureActive = false;
+          _scaleStartMatrix = null;
+        }
+        return;
+      }
+      _ptr('up', e, box);
+      _touchPointers.remove(e.pointer);
+      _remoteTouchDown = false;
+      return;
+    }
+    _ptr('up', e, box);
+  }
+
+  void _beginScale(ScaleUpdateDetails details) {
+    _scaleStartMatrix = _zoomController.value.clone();
+    _scaleStartFocal = details.localFocalPoint;
+    _scaleStartGestureValue = details.scale;
+    _scaleGestureActive = true;
+  }
+
+  Matrix4 _clampZoomMatrix(Matrix4 matrix, Size viewport) {
+    final scale = matrix.getMaxScaleOnAxis().clamp(1.0, 5.0).toDouble();
+    final translation = matrix.getTranslation();
+    final minX = viewport.width * (1.0 - scale);
+    final minY = viewport.height * (1.0 - scale);
+    final x = translation.x.clamp(minX, 0.0).toDouble();
+    final y = translation.y.clamp(minY, 0.0).toDouble();
+    return Matrix4.identity()
+      ..translate(x, y)
+      ..scale(scale);
+  }
+
+  void _scaleStart(ScaleStartDetails details) {
+    if (details.pointerCount >= 2) {
+      _scaleStartMatrix = _zoomController.value.clone();
+      _scaleStartFocal = details.localFocalPoint;
+      _scaleStartGestureValue = 1.0;
+      _scaleGestureActive = true;
+    } else {
+      _scaleGestureActive = false;
+      _scaleStartMatrix = null;
+    }
+  }
+
+  void _scaleUpdate(ScaleUpdateDetails details, Size viewport) {
+    if (details.pointerCount < 2) return;
+    if (!_scaleGestureActive || _scaleStartMatrix == null) {
+      _beginScale(details);
+      return;
+    }
+    final base = _scaleStartMatrix!;
+    final baseScale = base.getMaxScaleOnAxis().clamp(1.0, 5.0).toDouble();
+    final desiredScale = (baseScale * (details.scale / _scaleStartGestureValue)).clamp(1.0, 5.0).toDouble();
+    final factor = desiredScale / baseScale;
+    final currentFocal = details.localFocalPoint;
+    final next = Matrix4.identity()
+      ..translate(currentFocal.dx, currentFocal.dy)
+      ..scale(factor)
+      ..translate(-_scaleStartFocal.dx, -_scaleStartFocal.dy)
+      ..multiply(base);
+    _zoomController.value = _clampZoomMatrix(next, viewport);
+    if (mounted) setState(() {});
+  }
+
+  void _scaleEnd(ScaleEndDetails details) {
+    _scaleGestureActive = false;
+    _scaleStartMatrix = null;
+  }
+
+  void _resetZoom() {
+    _zoomController.value = Matrix4.identity();
+    _scaleGestureActive = false;
+    _scaleStartMatrix = null;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleFullscreen() async {
+    final next = !_isFullscreen;
+    _fullscreenHudTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _isFullscreen = next;
+        _showFullscreenExit = next;
+      });
+    }
+    if (Platform.isWindows) {
+      WinInput.setViewerFullscreen(next);
+    } else if (Platform.isAndroid) {
+      await SystemChrome.setEnabledSystemUIMode(
+        next ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
+    }
+    if (next) _scheduleFullscreenHudHide();
+  }
+
+  void _scheduleFullscreenHudHide() {
+    _fullscreenHudTimer?.cancel();
+    _fullscreenHudTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _isFullscreen) setState(() => _showFullscreenExit = false);
+    });
+  }
+
+  void _revealFullscreenExit() {
+    if (!_isFullscreen || _showFullscreenExit) return;
+    setState(() => _showFullscreenExit = true);
+    _scheduleFullscreenHudHide();
+  }
+
+  KeyEventResult _handleViewerKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey == LogicalKeyboardKey.escape && _isFullscreen) {
+      _toggleFullscreen();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.f11) {
+      _toggleFullscreen();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.digit0 &&
+        HardwareKeyboard.instance.isControlPressed) {
+      _resetZoom();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   Future<void> _keyboard() async {
@@ -877,6 +1079,20 @@ class _RemoteViewState extends State<RemoteView> {
                     IconButton(icon: const Icon(Icons.circle_outlined, color: Colors.white), onPressed: () => v.sendControl({'t': 'nav', 'a': 'home'})),
                     IconButton(icon: const Icon(Icons.crop_square, color: Colors.white), onPressed: () => v.sendControl({'t': 'nav', 'a': 'recents'})),
                   ],
+                  IconButton(
+                    tooltip: 'Reset preview zoom (Ctrl+0)',
+                    icon: const Icon(Icons.zoom_out_map, color: Colors.white),
+                    onPressed: _resetZoom,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text('${(_zoomScale * 100).round()}%', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                  ),
+                  IconButton(
+                    tooltip: 'Full screen (F11)',
+                    icon: const Icon(Icons.fullscreen, color: Colors.white),
+                    onPressed: _toggleFullscreen,
+                  ),
                   const SizedBox(width: 8),
                   Text(
                     '${v.metrics.resolution} • ${v.metrics.fps} • ${v.metrics.bitrateKbps} • RTT ${v.metrics.rttMs} • Loss ${v.metrics.packetLoss}',
@@ -891,38 +1107,116 @@ class _RemoteViewState extends State<RemoteView> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: v,
-      builder: (ctx, child) => Stack(
-        children: [
-          Positioned.fill(
-            child: LayoutBuilder(builder: (ctx, c) {
-              final box = Size(c.maxWidth, c.maxHeight);
-              return Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (e) => _ptr('down', e, box),
-                onPointerMove: (e) => _ptr('move', e, box),
-                onPointerUp: (e) => _ptr('up', e, box),
-                onPointerSignal: (e) {
-                  if (e is PointerScrollEvent) v.sendControl({'t': 'wheel', 'dy': e.scrollDelta.dy});
-                },
-                child: v.hasVideo
-                    ? RTCVideoView(v.renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain)
-                    : Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(
-                            v.status,
-                            style: const TextStyle(color: Colors.white, fontSize: 18),
-                            textAlign: TextAlign.center,
-                          ),
+    return Focus(
+      focusNode: _keyboardFocus,
+      autofocus: true,
+      onKeyEvent: _handleViewerKey,
+      child: AnimatedBuilder(
+        animation: v,
+        builder: (ctx, child) => Stack(
+          children: [
+            Positioned.fill(
+              child: LayoutBuilder(builder: (ctx, c) {
+                final box = Size(c.maxWidth, c.maxHeight);
+                if (_lastViewportSize != box) {
+                  _lastViewportSize = box;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) _zoomController.value = _clampZoomMatrix(_zoomController.value, box);
+                  });
+                }
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onScaleStart: _scaleStart,
+                  onScaleUpdate: (details) => _scaleUpdate(details, box),
+                  onScaleEnd: _scaleEnd,
+                  onTap: _revealFullscreenExit,
+                  onDoubleTap: _resetZoom,
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: (e) => _pointerDown(e, box),
+                    onPointerMove: (e) => _pointerMove(e, box),
+                    onPointerUp: (e) => _pointerUp(e, box),
+                    onPointerCancel: (e) => _pointerUp(e, box),
+                    onPointerSignal: (e) {
+                      if (e is PointerScrollEvent) v.sendControl({'t': 'wheel', 'dy': e.scrollDelta.dy});
+                    },
+                    child: MouseRegion(
+                      onHover: (_) => _revealFullscreenExit(),
+                      child: AnimatedBuilder(
+                        animation: _zoomController,
+                        builder: (ctx, child) => ClipRect(
+                          child: v.hasVideo
+                              ? Transform(
+                                  transform: _zoomController.value,
+                                  alignment: Alignment.topLeft,
+                                  child: SizedBox.expand(
+                                    child: RTCVideoView(
+                                      v.renderer,
+                                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                                    ),
+                                  ),
+                                )
+                              : Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(24),
+                                    child: Text(
+                                      v.status,
+                                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                ),
                         ),
                       ),
-              );
-            }),
-          ),
-          Positioned(top: 0, left: 0, right: 0, child: _toolbar()),
-        ],
+                    ),
+                  ),
+                );
+              }),
+            ),
+            if (!_isFullscreen) Positioned(top: 0, left: 0, right: 0, child: _toolbar()),
+            if (!_isFullscreen && v.authed && v.videoTrackReceived && !v.firstVideoFrameRendered)
+              Positioned(
+                top: 58,
+                left: 12,
+                right: 12,
+                child: IgnorePointer(
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 620),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.78),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Text(
+                        v.status,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (_isFullscreen && _showFullscreenExit)
+              Positioned(
+                top: 12,
+                right: 12,
+                child: SafeArea(
+                  child: Material(
+                    color: Colors.black.withOpacity(0.78),
+                    borderRadius: BorderRadius.circular(24),
+                    child: IconButton(
+                      tooltip: 'Exit full screen (Esc)',
+                      icon: const Icon(Icons.fullscreen_exit, color: Colors.white),
+                      onPressed: _toggleFullscreen,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

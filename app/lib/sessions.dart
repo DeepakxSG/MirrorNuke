@@ -377,11 +377,22 @@ class ShareSession extends ChangeNotifier {
         _names.add(s.name);
       }
     } else {
+      AppLog.add('capture.android', 'Requesting Android screen-capture permission');
       final ok = await Helper.requestCapturePermission();
-      if (!ok) throw 'permission denied';
-      await AndroidControl.startCaptureService();
-      await Future.delayed(const Duration(milliseconds: 300));
+      if (!ok) throw 'Screen-capture permission was not granted';
+      // Android 14+ requires the user consent step before a mediaProjection
+      // foreground service is started. Keep this order: consent -> FGS -> capture.
+      final serviceReady = await AndroidControl.startCaptureService();
+      if (!serviceReady) throw 'Android capture foreground service did not start';
       final st = await navigator.mediaDevices.getDisplayMedia({'video': true});
+      final videoTracks = st.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        await st.dispose();
+        throw 'Android returned a screen stream without a video track';
+      }
+      for (final track in videoTracks) {
+        AppLog.add('capture.android', 'Screen video track ${track.id}; enabled=${track.enabled}');
+      }
       _streams.add(st);
       _names.add('Phone Screen');
 
@@ -834,7 +845,12 @@ class ViewSession extends ChangeNotifier {
   RTCDataChannel? _audioDc;
   final Map<String, MediaStream> _byId = {};
   final List<String> _order = [];
+  final Set<String> _attachedTrackIds = <String>{};
   final List<RTCIceCandidate> _pendingIce = [];
+  MediaStream? _fallbackRemoteStream;
+  Timer? _videoTrackWatchdog;
+  bool videoTrackReceived = false;
+  bool firstVideoFrameRendered = false;
   String _nonce = '', _senderFp = '', _viewerFp = '';
 
   final WinSpeakerPlayer _winSpeaker = WinSpeakerPlayer();
@@ -842,7 +858,7 @@ class ViewSession extends ChangeNotifier {
   Timer? _statsTimer;
   int _prevBytesRecv = 0, _prevStatsTs = 0;
 
-  bool get hasVideo => authed && renderer.srcObject != null;
+  bool get hasVideo => authed && (renderer.srcObject?.getVideoTracks().isNotEmpty ?? false);
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -879,6 +895,12 @@ class ViewSession extends ChangeNotifier {
     }
     await renderer.initialize();
     renderer.onResize = () => _notify();
+    renderer.onFirstFrameRendered = () {
+      firstVideoFrameRendered = true;
+      _videoTrackWatchdog?.cancel();
+      _set('Video is live');
+      AppLog.add('view.video', 'First remote video frame rendered');
+    };
     _sig.onMessage = _onMsg;
     _sig.onStatus = _set;
     _sig.onConnected = () {
@@ -890,6 +912,13 @@ class ViewSession extends ChangeNotifier {
 
   Future<void> _newPc() async {
     _statsTimer?.cancel();
+    _videoTrackWatchdog?.cancel();
+    renderer.srcObject = null;
+    final oldFallback = _fallbackRemoteStream;
+    _fallbackRemoteStream = null;
+    if (oldFallback != null) {
+      try { await oldFallback.dispose(); } catch (_) {}
+    }
     await _pc?.close();
     authed = false;
     _remoteDescSet = false;
@@ -900,7 +929,9 @@ class ViewSession extends ChangeNotifier {
     _viewerFp = '';
     _byId.clear();
     _order.clear();
-    renderer.srcObject = null;
+    _attachedTrackIds.clear();
+    videoTrackReceived = false;
+    firstVideoFrameRendered = false;
 
     _pc = await createPeerConnection(_rtcConfig);
     _pc!.onIceCandidate = (c) {
@@ -920,19 +951,27 @@ class ViewSession extends ChangeNotifier {
           s == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         authed = false;
         _jitterBuffer.reset();
+        _videoTrackWatchdog?.cancel();
         _set('Connection lost. Reconnecting...');
         _scheduleReady();
       }
     };
-    _pc!.onTrack = (e) {
-      if (e.streams.isEmpty) return;
-      final s = e.streams[0];
-      if (!_byId.containsKey(s.id)) _order.add(s.id);
-      _byId[s.id] = s;
-      if (s.getAudioTracks().isNotEmpty) {
-        remoteAudioEnabled = true;
+    _pc!.onIceConnectionState = (s) {
+      AppLog.add('view.ice', '$s');
+      if (s == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _set('Network path failed. Check that both devices are on the same Wi-Fi.');
       }
-      _show();
+    };
+
+    // Unified Plan onTrack events are allowed to have no associated streams.
+    // Never drop the track just because event.streams is empty.
+    _pc!.onTrack = (e) {
+      unawaited(_attachRemoteTrack(e.track, e.streams));
+    };
+    // Also accept legacy stream/track callbacks for native/plugin compatibility.
+    _pc!.onAddStream = (stream) => _registerRemoteStream(stream);
+    _pc!.onAddTrack = (stream, track) {
+      unawaited(_attachRemoteTrack(track, [stream]));
     };
 
     _dc = await _pc!.createDataChannel('control', _controlInit());
@@ -958,12 +997,97 @@ class ViewSession extends ChangeNotifier {
     _startStatsLoop();
   }
 
+  void _registerRemoteStream(MediaStream stream) {
+    if (_disposed) return;
+    if (!_byId.containsKey(stream.id)) _order.add(stream.id);
+    _byId[stream.id] = stream;
+    if (stream.getAudioTracks().isNotEmpty) remoteAudioEnabled = true;
+    if (stream.getVideoTracks().isNotEmpty) {
+      videoTrackReceived = true;
+      _videoTrackWatchdog?.cancel();
+      if (!firstVideoFrameRendered) {
+        _videoTrackWatchdog = Timer(const Duration(seconds: 8), () {
+          if (!_disposed && videoTrackReceived && !firstVideoFrameRendered) {
+            _set('Video track connected, but no frames are rendering. Restart screen sharing on the phone and check its capture permission.');
+          }
+        });
+      }
+    }
+    AppLog.add('view.stream', 'Remote stream ${stream.id}: ${stream.getVideoTracks().length} video, ${stream.getAudioTracks().length} audio track(s)');
+    _show();
+  }
+
+  Future<void> _attachRemoteTrack(MediaStreamTrack track, List<MediaStream> eventStreams) async {
+    if (_disposed || _attachedTrackIds.contains(track.id)) return;
+    _attachedTrackIds.add(track.id);
+    if (track.kind == 'video') {
+      videoTrackReceived = true;
+      firstVideoFrameRendered = false;
+    }
+    try {
+      if (eventStreams.isNotEmpty) {
+        for (final stream in eventStreams) {
+          if (!stream.getTracks().any((existing) => existing.id == track.id)) {
+            await stream.addTrack(track);
+          }
+          _registerRemoteStream(stream);
+        }
+      } else {
+        // Streamless tracks are valid in Unified Plan. Build one receiver-side
+        // stream and add each streamless track to it so RTCVideoRenderer can use it.
+        final fallback = _fallbackRemoteStream ??=
+            await createLocalMediaStream('mirrornuke-remote-$target');
+        if (!fallback.getTracks().any((t) => t.id == track.id)) {
+          await fallback.addTrack(track);
+        }
+        _registerRemoteStream(fallback);
+      }
+
+      if (track.kind == 'video') {
+        track.enabled = true;
+        videoTrackReceived = true;
+        _set('Video track received; waiting for first frame...');
+        _videoTrackWatchdog?.cancel();
+        _videoTrackWatchdog = Timer(const Duration(seconds: 8), () {
+          if (!_disposed && videoTrackReceived && !firstVideoFrameRendered) {
+            _set('Video track connected, but no frames are rendering. Restart screen sharing on the phone and check its capture permission.');
+          }
+        });
+      } else if (track.kind == 'audio') {
+        remoteAudioEnabled = true;
+      }
+      AppLog.add('view.track', 'Remote ${track.kind} track ${track.id}; event streams=${eventStreams.length}');
+      _show();
+    } catch (e) {
+      _attachedTrackIds.remove(track.id);
+      AppLog.add('view.track.attach', e);
+      _set('Received a remote track but could not attach it to the viewer: $e');
+    }
+  }
+
+  Future<void> _recoverReceiverTracks() async {
+    final pc = _pc;
+    if (pc == null || _disposed) return;
+    try {
+      final receivers = await pc.getReceivers();
+      for (final receiver in receivers) {
+        final track = receiver.track;
+        if (track != null && !_attachedTrackIds.contains(track.id)) {
+          await _attachRemoteTrack(track, const <MediaStream>[]);
+        }
+      }
+    } catch (e) {
+      AppLog.add('view.receivers', e);
+    }
+  }
+
   void _startStatsLoop() {
     _prevBytesRecv = 0;
     _prevStatsTs = DateTime.now().millisecondsSinceEpoch;
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (_pc == null || _disposed || !authed) return;
       try {
+        if (!videoTrackReceived) await _recoverReceiverTracks();
         final stats = await _pc!.getStats();
         final now = DateTime.now().millisecondsSinceEpoch;
         for (final report in stats) {
@@ -1028,7 +1152,14 @@ class ViewSession extends ChangeNotifier {
           final expected = proof(password, 'S', _nonce, roomKey, _senderFp, _viewerFp);
           if (sp is String && constEq(sp, expected)) {
             authed = true;
-            _set('Connected');
+            _set(videoTrackReceived ? 'Authenticated; preparing phone display...' : 'Authenticated; waiting for phone video track...');
+            _videoTrackWatchdog?.cancel();
+            _videoTrackWatchdog = Timer(const Duration(seconds: 8), () {
+              if (!_disposed && authed && !videoTrackReceived) {
+                _set('Controls connected, but the phone has not sent a video track. Stop and restart screen sharing on the phone.');
+              }
+            });
+            unawaited(_recoverReceiverTracks());
             _show();
           } else {
             authed = false;
@@ -1067,6 +1198,16 @@ class ViewSession extends ChangeNotifier {
     MediaStream? s;
     if (selected < ids.length) s = _byId[ids[selected]];
     s ??= selected < _order.length ? _byId[_order[selected]] : null;
+    // Prefer a stream containing video; an audio-only stream must not leave
+    // the viewer showing a blank screen when multiple streams are present.
+    if (s == null || s.getVideoTracks().isEmpty) {
+      for (final stream in _byId.values) {
+        if (stream.getVideoTracks().isNotEmpty) {
+          s = stream;
+          break;
+        }
+      }
+    }
     s ??= _byId.values.isNotEmpty ? _byId.values.first : null;
     if (s != null) {
       renderer.srcObject = s;
@@ -1148,10 +1289,15 @@ class ViewSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _statsTimer?.cancel();
+    _videoTrackWatchdog?.cancel();
     _winSpeaker.close();
     if (Platform.isAndroid) AndroidControl.stopAudioPlayback();
+    renderer.srcObject = null;
     _pc?.close();
     _sig.close();
+    final fallback = _fallbackRemoteStream;
+    _fallbackRemoteStream = null;
+    if (fallback != null) fallback.dispose();
     renderer.dispose();
     super.dispose();
   }

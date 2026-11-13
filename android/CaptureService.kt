@@ -39,8 +39,19 @@ class CaptureService : Service() {
         @Volatile
         var audioEventSink: EventChannel.EventSink? = null
 
+        // MainActivity waits for the service to confirm startForeground() before
+        // asking flutter_webrtc to create the MediaProjection capture.
+        @Volatile
+        var foregroundStartCallback: ((Boolean) -> Unit)? = null
+
         @Volatile
         private var playerTrack: AudioTrack? = null
+
+        fun reportForegroundStart(ready: Boolean) {
+            val callback = foregroundStartCallback
+            foregroundStartCallback = null
+            callback?.invoke(ready)
+        }
 
         fun playRemotePcm(pcmBytes: ByteArray) {
             try {
@@ -98,11 +109,14 @@ class CaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action
         if (!ensureForeground()) {
+            if (action == ACTION_START_FOREGROUND) reportForegroundStart(false)
             stopSelf()
             return START_NOT_STICKY
         }
-        when (intent?.action) {
+        if (action == ACTION_START_FOREGROUND) reportForegroundStart(true)
+        when (action) {
             ACTION_START_AUDIO -> {
                 val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
                 @Suppress("DEPRECATION")

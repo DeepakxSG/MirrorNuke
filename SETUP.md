@@ -35,3 +35,21 @@ flutter build windows --release
 3. Open **MirrorNuke** on your Android phone, go to **Devices → Scan Wi-Fi** (or enter the `ws://` URL in **Settings**), enter the same **Room Code** and **Pairing Password** (8+ characters), and enable **Share this device screen** + **Stream device audio**.
 4. Tap **Start Casting Session** on the phone, approve the screen/audio capture prompts, and tap **Connect** on your PC.
    - *Note:* DRM-protected apps (Netflix, Prime Video) block `AudioPlaybackCapture` at the Android OS level; local video players (VLC, MX Player), browsers, YouTube, and games stream stereo audio normally.
+
+
+## D) Phone controls work but PC preview is blank
+
+The navigation controls use a WebRTC data channel, while the picture uses a separate video track. A working Back/Home/Recents button does not prove that a video frame reached the Windows renderer.
+
+1. Rebuild and install the updated APK and Windows app from the same source version.
+2. On the phone, start a fresh sharing session and approve screen capture. On Android 14+, choose **Entire screen** when that option is shown if you want the whole phone display.
+3. On Windows, connect to the phone from the Devices/Remote view and wait for the video status banner.
+4. If it says no video track arrived, stop sharing on the phone and start a new session. If it says a track arrived but no frames are rendering, check the Android capture permission and repeat the capture prompt.
+5. Test on the phone home screen first. Some apps deliberately block screen capture and may appear black.
+
+See `VIDEO_TROUBLESHOOTING.md` for the full explanation and diagnostic-log collection steps.
+
+
+## E) Local zoom and full-screen viewer (2.0.2)
+
+See `ZOOM_FULLSCREEN_GUIDE.md` for pinch-zoom, preview pan, zoom reset, full-screen shortcuts, and the recommended hardware test sequence. Version 2.0.2 uses `vector_math` explicitly; rerun `python tools/setup_project.py` so Flutter refreshes dependencies before building.

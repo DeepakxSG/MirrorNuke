@@ -65,15 +65,30 @@ class MainActivity : FlutterActivity() {
                         result.success(svc != null)
                     }
                     "startCapture" -> {
+                        CaptureService.foregroundStartCallback = { ready ->
+                            if (ready) {
+                                result.success(true)
+                            } else {
+                                result.error(
+                                    "capture_service_start_failed",
+                                    "Android could not start the screen-capture foreground service.",
+                                    null
+                                )
+                            }
+                        }
                         val intent = Intent(this, CaptureService::class.java).apply {
                             action = CaptureService.ACTION_START_FOREGROUND
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(intent)
-                        } else {
-                            startService(intent)
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                        } catch (e: Exception) {
+                            CaptureService.foregroundStartCallback = null
+                            result.error("capture_service_start_failed", e.message, null)
                         }
-                        result.success(true)
                     }
                     "startAudioCapture" -> {
                         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {

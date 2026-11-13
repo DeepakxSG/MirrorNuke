@@ -1,5 +1,7 @@
 # MirrorNuke
 
+**Current source patch: 2.0.2** — retains the Windows remote-video receiver and Android capture-startup fixes, and adds local preview pinch-zoom/pan plus a HUD-free full-screen viewer. See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for blank-preview diagnostics and [ZOOM_FULLSCREEN_GUIDE.md](ZOOM_FULLSCREEN_GUIDE.md) for the new viewer controls.
+
 Private, one-click, zero-cloud screen + stereo audio casting and remote control across **Windows 10/11**, **Android 7+**, and **Android TV** — peer-to-peer over your own Wi-Fi, with a built-in signaling server (no terminal or Node.js required on Windows).
 
 - **One-Click Local Hosting:** Windows launches a built-in Dart WebSocket signaling and room directory server automatically on port `8080`, displaying your local Wi-Fi URL (`ws://<pc-ip>:8080`) with one-tap copy and automatic LAN discovery.
@@ -46,6 +48,15 @@ flutter build apk --release
 ## Tests
 
 ```bash
-cd server && node --test server.test.js
-cd mirrornuke_app && flutter test
+cd server && npm install && npm test
+cd ../
+python tools/setup_project.py
+cd mirrornuke_app && flutter analyze --no-fatal-infos && flutter test
 ```
+
+See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for a focused phone-to-PC screen test and how to interpret the new on-screen diagnostic messages.
+
+
+## Version 2.0.2: local zoom and immersive viewing
+
+The remote viewer now supports local two-finger preview zoom/pan, coordinate-correct remote input while zoomed, preview reset, and a HUD-free full-screen mode. See `ZOOM_FULLSCREEN_GUIDE.md` and `V2.0.2_CHANGELOG.md`.
