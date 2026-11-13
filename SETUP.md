@@ -52,4 +52,9 @@ See `VIDEO_TROUBLESHOOTING.md` for the full explanation and diagnostic-log colle
 
 ## E) Local zoom and full-screen viewer (2.0.2)
 
-See `ZOOM_FULLSCREEN_GUIDE.md` for pinch-zoom, preview pan, zoom reset, full-screen shortcuts, and the recommended hardware test sequence. Version 2.0.2 uses `vector_math` explicitly; rerun `python tools/setup_project.py` so Flutter refreshes dependencies before building.
+See `ZOOM_FULLSCREEN_GUIDE.md` for pinch-zoom, preview pan, zoom reset, full-screen shortcuts, and the recommended hardware test sequence. Version 2.0.3 fixes nullable WebRTC track IDs and removes the redundant `vector_math` import. Rerun `python tools/setup_project.py` so the generated Flutter project receives the updated sources and dependencies before building.
+
+
+## F) CI failure at `sessions.dart` line 1022 (2.0.3 fix)
+
+If GitHub Actions reports `String?` cannot be assigned to `String`, make sure the repository contains the 2.0.3 `app/lib/sessions.dart`, `app/lib/main.dart`, and `tools/templates/pubspec.yaml`. The receiver now uses the native track ID when available and `identityHashCode(track)` when it is absent. Do not make analysis non-fatal to hide this error; `flutter analyze --no-fatal-infos` should remain a required CI gate.

@@ -1,6 +1,6 @@
 # MirrorNuke
 
-**Current source patch: 2.0.2** — retains the Windows remote-video receiver and Android capture-startup fixes, and adds local preview pinch-zoom/pan plus a HUD-free full-screen viewer. See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for blank-preview diagnostics and [ZOOM_FULLSCREEN_GUIDE.md](ZOOM_FULLSCREEN_GUIDE.md) for the new viewer controls.
+**Current source patch: 2.0.3** — retains the Windows remote-video receiver and Android capture-startup fixes, and adds local preview pinch-zoom/pan plus a HUD-free full-screen viewer. Version 2.0.3 fixes nullable WebRTC track IDs and removes the redundant Matrix4 import. See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for blank-preview diagnostics and [ZOOM_FULLSCREEN_GUIDE.md](ZOOM_FULLSCREEN_GUIDE.md) for the new viewer controls.
 
 Private, one-click, zero-cloud screen + stereo audio casting and remote control across **Windows 10/11**, **Android 7+**, and **Android TV** — peer-to-peer over your own Wi-Fi, with a built-in signaling server (no terminal or Node.js required on Windows).
 
@@ -60,3 +60,11 @@ See [VIDEO_TROUBLESHOOTING.md](VIDEO_TROUBLESHOOTING.md) for a focused phone-to-
 ## Version 2.0.2: local zoom and immersive viewing
 
 The remote viewer now supports local two-finger preview zoom/pan, coordinate-correct remote input while zoomed, preview reset, and a HUD-free full-screen mode. See `ZOOM_FULLSCREEN_GUIDE.md` and `V2.0.2_CHANGELOG.md`.
+
+
+## Version 2.0.3: CI null-safety and workflow update
+
+- Fixed nullable `MediaStreamTrack.id` handling in the remote video receiver. Tracks without an ID are deduplicated using object identity rather than passing `String?` to a `String` set.
+- Removed the redundant direct `vector_math` import and dependency; `Matrix4` is already exported by Flutter's gestures library used by the viewer.
+- Updated the Windows installer version to 2.0.3.
+- Updated GitHub Actions to also validate pull requests, use read-only repository permissions, name each validation/build step clearly, and retain build artifacts for 14 days.

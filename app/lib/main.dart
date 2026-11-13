@@ -5,7 +5,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:vector_math/vector_math_64.dart' show Matrix4;
 import 'android_control.dart';
 import 'embedded_server.dart';
 import 'lan_discovery.dart';

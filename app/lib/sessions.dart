@@ -997,6 +997,24 @@ class ViewSession extends ChangeNotifier {
     _startStatsLoop();
   }
 
+  // WebRTC bindings expose MediaStreamTrack.id as String? on some platforms.
+  // Prefer the protocol track ID, and fall back to object identity when the
+  // native WebRTC layer does not provide one.
+  String _trackAttachmentKey(MediaStreamTrack track) {
+    final id = track.id;
+    return (id != null && id.isNotEmpty)
+        ? 'id:$id'
+        : 'identity:${identityHashCode(track)}';
+  }
+
+  bool _streamContainsTrack(MediaStream stream, MediaStreamTrack track) {
+    final id = track.id;
+    return stream.getTracks().any((existing) {
+      if (identical(existing, track)) return true;
+      return id != null && id.isNotEmpty && existing.id == id;
+    });
+  }
+
   void _registerRemoteStream(MediaStream stream) {
     if (_disposed) return;
     if (!_byId.containsKey(stream.id)) _order.add(stream.id);
@@ -1018,8 +1036,8 @@ class ViewSession extends ChangeNotifier {
   }
 
   Future<void> _attachRemoteTrack(MediaStreamTrack track, List<MediaStream> eventStreams) async {
-    if (_disposed || _attachedTrackIds.contains(track.id)) return;
-    _attachedTrackIds.add(track.id);
+    final attachmentKey = _trackAttachmentKey(track);
+    if (_disposed || !_attachedTrackIds.add(attachmentKey)) return;
     if (track.kind == 'video') {
       videoTrackReceived = true;
       firstVideoFrameRendered = false;
@@ -1027,7 +1045,7 @@ class ViewSession extends ChangeNotifier {
     try {
       if (eventStreams.isNotEmpty) {
         for (final stream in eventStreams) {
-          if (!stream.getTracks().any((existing) => existing.id == track.id)) {
+          if (!_streamContainsTrack(stream, track)) {
             await stream.addTrack(track);
           }
           _registerRemoteStream(stream);
@@ -1037,7 +1055,7 @@ class ViewSession extends ChangeNotifier {
         // stream and add each streamless track to it so RTCVideoRenderer can use it.
         final fallback = _fallbackRemoteStream ??=
             await createLocalMediaStream('mirrornuke-remote-$target');
-        if (!fallback.getTracks().any((t) => t.id == track.id)) {
+        if (!_streamContainsTrack(fallback, track)) {
           await fallback.addTrack(track);
         }
         _registerRemoteStream(fallback);
@@ -1059,7 +1077,7 @@ class ViewSession extends ChangeNotifier {
       AppLog.add('view.track', 'Remote ${track.kind} track ${track.id}; event streams=${eventStreams.length}');
       _show();
     } catch (e) {
-      _attachedTrackIds.remove(track.id);
+      _attachedTrackIds.remove(attachmentKey);
       AppLog.add('view.track.attach', e);
       _set('Received a remote track but could not attach it to the viewer: $e');
     }
@@ -1072,7 +1090,7 @@ class ViewSession extends ChangeNotifier {
       final receivers = await pc.getReceivers();
       for (final receiver in receivers) {
         final track = receiver.track;
-        if (track != null && !_attachedTrackIds.contains(track.id)) {
+        if (track != null && !_attachedTrackIds.contains(_trackAttachmentKey(track))) {
           await _attachRemoteTrack(track, const <MediaStream>[]);
         }
       }

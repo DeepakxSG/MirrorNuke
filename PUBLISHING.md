@@ -20,3 +20,10 @@
 - Local preview-only pinch zoom and pan; remote input coordinates are mapped through the preview transform.
 - HUD-free full-screen viewer with Windows borderless monitor mode and Android immersive mode.
 - Exit by Esc/F11 on Windows or the temporary on-screen exit control.
+
+
+## Version 2.0.3 CI fix
+
+- Android and Windows CI now compile the null-safe remote track attachment logic.
+- The redundant explicit `vector_math` dependency has been removed.
+- The Windows installer reports version 2.0.3.
